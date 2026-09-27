@@ -13,6 +13,8 @@ from .dataplane import Channel, FRAME_TOPIC, FRAME_HEADER, FRAME_BYTES
 from .wire import Fault, number
 from .synchronization import CaptureAlignment
 
+WB_KEYS = ("camera.white_balance.red_gain", "camera.white_balance.blue_gain")
+
 
 class Camera:
     def __init__(self, config, emit, log):
@@ -28,6 +30,9 @@ class Camera:
         self.alignment = None
         self.synced = False
         self.started_at = 0
+        values = config.get("parameters", {})
+        self.white_balance = tuple(number(values, key, 1.0, 0.01, 32.0) for key in WB_KEYS)
+        self.wb_pending = False
 
     def sync_state(self):
         if self.alignment is None:
@@ -45,6 +50,16 @@ class Camera:
                 "error": self.error, "topic": FRAME_TOPIC, "imu_sync": self.sync_state()}
 
     def command(self, op, args):
+        if op == "params.apply":
+            if any(key not in WB_KEYS for key in args):
+                raise Fault("invalid_argument", "Unknown camera parameter")
+            pair = tuple(number(args, key, old, 0.01, 32.0)
+                         for key, old in zip(WB_KEYS, self.white_balance))
+            if self.camera is not None:
+                self._validate_white_balance(pair)
+            self.white_balance = pair
+            self.wb_pending = True
+            return dict(zip(WB_KEYS, pair))
         if op == "camera.status":
             return self.state()
         if op == "camera.stop":
@@ -82,8 +97,10 @@ class Camera:
                 self.synced = False
                 c = self.lc.controls
                 self.camera.start({c.AeEnable: False, c.AwbEnable: False,
+                                   c.ColourGains: self.white_balance,
                                    c.ExposureTime: self.exposure, c.AnalogueGain: self.gain,
                                    c.FrameDurationLimits: (self.duration, self.duration)})
+                self.wb_pending = False
                 self.running = True
                 self.last_frame = time.monotonic()
                 self.started_at = self.last_frame
@@ -120,6 +137,7 @@ class Camera:
         if (actual.output_size.width, actual.output_size.height, actual.bit_depth) != (1600, 1300, 10):
             raise Fault("camera_config", "Full sensor RAW10 mode was not retained")
         self.camera.configure(config)
+        self._validate_white_balance(self.white_balance)
         self.config, self.stream, self.stride = config, main.stream, main.stride
         self.allocator = lc.FrameBufferAllocator(self.camera)
         self.allocator.allocate(self.stream)
@@ -146,6 +164,13 @@ class Camera:
     def filenos(self):
         return [self.manager.event_fd] if self.running else []
 
+    def _validate_white_balance(self, pair):
+        info = self.camera.controls.get(self.lc.controls.ColourGains)
+        if info is None:
+            raise Fault("not_supported", "Camera does not expose ColourGains")
+        if any(not info.min <= gain <= info.max for gain in pair):
+            raise Fault("invalid_argument", "White balance outside camera ColourGains range")
+
     def ready(self, fd):
         try:
             for request in self.manager.get_ready_requests():
@@ -157,7 +182,10 @@ class Camera:
                 else:
                     self.bad_frames += 1
                 request.reuse()
+                if self.wb_pending:
+                    request.set_control(self.lc.controls.ColourGains, self.white_balance)
                 self.camera.queue_request(request)
+                self.wb_pending = False
         except Exception as exc:
             self._fault(exc)
 

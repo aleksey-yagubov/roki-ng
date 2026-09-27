@@ -18,6 +18,10 @@ COLOUR_DEFAULTS = {
 }
 
 SCHEMA = {
+    **{f"camera.white_balance.{colour}_gain":
+       ("float", 1.0, 0.01, 32.0, "next_request",
+        f"Manual white balance {colour} gain; calibrate for venue lighting")
+       for colour in ("red", "blue")},
     "logging.stdout_enabled": ("bool", False, None, None, "live", "Mirror runtime logs to supervisor stdout"),
     "motion.max_step_mm": ("float", 24.0, 1, 64, "next_job", "Forward stride scale"),
     "motion.max_side_mm": ("float", 12.0, 1, 20, "next_job", "Side stride scale"),

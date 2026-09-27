@@ -626,7 +626,8 @@ class Supervisor:
             validate_colour_ranges(self.params.values | values)
             applied = []
             try:
-                for role, mode in (("motherboard", "next_job"), ("detection", "next_frame")):
+                for role, mode in (("motherboard", "next_job"), ("detection", "next_frame"),
+                                   ("camera", "next_request")):
                     update = {k: v for k, v in values.items() if SCHEMA[k][4] == mode}
                     if update:
                         previous = {k: self.params.values[k] for k in update}

@@ -392,6 +392,14 @@ Simulation проверяет последовательности и прото
 
 ### Runtime-захват и IMU
 
+Ручной WB runtime задаётся существующим `params.set`: ключи
+`camera.white_balance.red_gain` и `camera.white_balance.blue_gain`, float
+0.01..32, `apply=next_request`. Значения сохраняются на роботе и применяются
+при старте либо через следующий свободный libcamera Request без перезапуска
+активного захвата. Подтверждение команды не означает немедленного изменения
+кадров в ISP. AE/AWB остаются выключенными. Defaults 1/1 не являются калибровкой.
+Direct-gst эти параметры не использует. Проверка: [WHITE_BALANCE_FIX.md](WHITE_BALANCE_FIX.md).
+
 `camera.start` открывает отдельный camera-worker для будущей детекции и
 локализации. Это не команда отправки RTP оператору. Нужны MANUAL и lease:
 
