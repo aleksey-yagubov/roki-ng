@@ -22,7 +22,7 @@
 ## Roki: перейти на опубликованный fork
 
 Репозиторий: [aleksey-yagubov/roki-mb-interface](https://github.com/aleksey-yagubov/roki-mb-interface).
-Закрепить commit **9919dcc5c68bd8beadbe7bbac354af123e77e151**.
+Закрепить commit **d869895b96fe48094c6333f1ebd269326e9f9b8f**.
 
 В нём уже включены ACM v2, CMake-сборка с системным pybind11, исправления
 BodyTimeout/getSinglePos и CALL без resume. Сверить и убрать из рецепта старые
@@ -30,6 +30,13 @@ BodyTimeout/getSinglePos и CALL без resume. Сверить и убрать �
 Обновить archive hash после смены SITE/VERSION. Нужные зависимости остались:
 rcb4-base-class `af9ade42eddcfa0c3ba0ca28a426d6df50ea0d24` и заголовки
 roki-mb-service `0d64f8bb28cfe816595d07cbd3bd15218c5c0982`.
+
+Submodules pybind11 и googletest удалены из fork. Pybind11 по-прежнему
+предоставляет Buildroot (python-pybind); GoogleTest не требуется.
+roki-mb-service используется только как MbMessages.hpp с общими типами,
+его старые RPC/сериализаторы не компилируются. Реализация ACM v2 находится
+в самом interface, не в изменённой копии submodule. Подробности:
+[DEPENDENCIES.md](https://github.com/aleksey-yagubov/roki-mb-interface/blob/d869895b96fe48094c6333f1ebd269326e9f9b8f/DEPENDENCIES.md).
 
 В `roki-buildroot/package/roki-mb-interface/` уже есть
 `0003-acm-v2-native-transport.patch`: ACM v2 не нужно портировать заново.
@@ -39,7 +46,7 @@ roki-mb-service `0d64f8bb28cfe816595d07cbd3bd15218c5c0982`.
 слот сопровождается ложным BodyTimeout и реконнектом.
 
 Правка и регрессионный тест уже в указанном commit. Источник истины для API:
-[ACM_V2.md](https://github.com/aleksey-yagubov/roki-mb-interface/blob/9919dcc5c68bd8beadbe7bbac354af123e77e151/ACM_V2.md).
+[ACM_V2.md](https://github.com/aleksey-yagubov/roki-mb-interface/blob/d869895b96fe48094c6333f1ebd269326e9f9b8f/ACM_V2.md).
 BodyTimeout уже должен иметь корректное имя ошибки; успешный вызов очищает
 старую ошибку. `getSinglePos` исправлен в библиотеке, но это не добавляет
 DeviceToCom в прошивку Зубра.
