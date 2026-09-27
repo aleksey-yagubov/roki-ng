@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "roki-ng"
+version = "0.1.0"
+description = "ROKI process-isolated manual runtime"
+requires-python = ">=3.11"
+dependencies = ["msgpack>=1.0"]
+
+[project.scripts]
+roki-supervisor = "roki_ng.__main__:main"
+roki-client = "roki_ng.client:main"
+
+[tool.setuptools.packages.find]
+include = ["roki_ng*"]
+
+[tool.setuptools.package-data]
+roki_ng = ["assets/*.json", "assets/slots/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

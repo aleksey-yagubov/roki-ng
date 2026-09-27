@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Local hardware notes and reference material not intended for publication.
+/docs/BODY_COMMUNICATION_RESUME.md
+/docs/SERVO_PARAMETER_REFERENCE.md
+/docs/ZUBR_DMA_TEST_2026_09_27.md
+/docs/ZUBR_UNIT0_TEST_2026_09_27.md
+/tools/check_zubr_dma.py
