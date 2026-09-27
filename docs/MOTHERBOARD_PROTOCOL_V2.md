@@ -3,10 +3,10 @@
 Согласование от 26 сентября 2026. ACM RPC, управление захватом и оба режима
 IMU stream реализованы в исходниках соседнего roki-mb-firmware. Точная
 раскладка, коды и ограничения описаны в
-[PROTOCOL.md](../../roki-mb-firmware/PROTOCOL.md); при расхождении он первичен.
+[PROTOCOL.md](https://github.com/aleksey-yagubov/roki-mb-firmware/blob/master/PROTOCOL.md); при расхождении он первичен.
 Прошивка и новая хост-библиотека установлены и проверены на голове без тела
-26.09.2026: [отчёт](../../roki-mb-firmware/ACM_V2_HEAD_TEST.md).
-API библиотеки: [ACM_V2.md](../../roki-mb-interface/ACM_V2.md).
+26.09.2026: [отчёт](https://github.com/aleksey-yagubov/roki-mb-firmware/blob/master/ACM_V2_HEAD_TEST.md).
+API библиотеки: [ACM_V2.md](https://github.com/aleksey-yagubov/roki-mb-interface/blob/master/ACM_V2.md).
 Worker-ы переведены на ACM v2; процедура привязки и её проверки описаны в
 [CAMERA_IMU_CAPTURE.md](CAMERA_IMU_CAPTURE.md).
 Этот протокол STM <-> CM4 не является UDP/MessagePack протоколом оператора.
@@ -243,5 +243,5 @@ Runtime libcamera со синхронной IMU:
 - Фрагментированные и склеенные чтения ACM, неверные длины, смена ttyACM номера.
 
 Измерения транспорта сохранены в
-[архиве экспериментов](../../roki-mb-firmware/LEGACY_ARCHIVE.md).
+[архиве экспериментов](https://github.com/aleksey-yagubov/roki-mb-firmware/blob/master/LEGACY_ARCHIVE.md).
 Они относятся к прежним тестовым прошивкам, не к реализации ACM v2.

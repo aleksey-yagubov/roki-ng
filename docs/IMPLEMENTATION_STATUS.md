@@ -55,7 +55,7 @@ MessagePack; точная привязка к RTP UnicamSequence ещё не р�
 возвращает BodyTimeout, ложный успешный ACK в новых проверках не наблюдается.
 Timeout не останавливает IMU stream. Исторические записи ниже описывают
 предыдущие версии и не заменяют текущий отчёт
-[ACM_V2_HEAD_TEST.md](../../roki-mb-firmware/ACM_V2_HEAD_TEST.md).
+[ACM_V2_HEAD_TEST.md](https://github.com/aleksey-yagubov/roki-mb-firmware/blob/master/ACM_V2_HEAD_TEST.md).
 
 ## Дополнение: неблокирующий UART тела в STM, 25 сентября 2026
 

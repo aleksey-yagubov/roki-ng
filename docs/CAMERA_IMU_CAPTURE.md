@@ -111,7 +111,7 @@ python3 tools/check_camera_imu.py --probe-body
 
 Логи: `out/motherboard-acm-v2-20260926/acm-workers-*.log` в общем workspace;
 на голове `/root/acm-workers-*.log`. Firmware/library тесты отдельно:
-[ACM_V2_HEAD_TEST.md](../../roki-mb-firmware/ACM_V2_HEAD_TEST.md).
+[ACM_V2_HEAD_TEST.md](https://github.com/aleksey-yagubov/roki-mb-firmware/blob/master/ACM_V2_HEAD_TEST.md).
 
 Дополнительно прошёл захват 300 секунд с probes отключённого тела: 17986 кадров
 и 17986 IMU в окне consumer, 17984 точные пары, unmatched_evicted=0. На границах
