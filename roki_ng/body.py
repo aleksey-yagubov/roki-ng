@@ -193,7 +193,7 @@ class Body:
     def _engine(self):
         if self.engine is None:
             from .motion.engine import Engine
-            self.engine = Engine(self.parameters)
+            self.engine = Engine(self.parameters, log=self.log)
         return self.engine
 
     def command(self, op, args):

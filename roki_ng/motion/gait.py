@@ -4,7 +4,6 @@
 import math
 import time
 from dataclasses import dataclass
-import starkit
 
 uprint = print
 
@@ -20,8 +19,8 @@ class GaitAlgorithms:
         angles = []
         anglesR = []
         anglesL = []
-        anglesR = starkit.alpha_calculation(self.xtr, self.ytr, self.ztr, self.xr, self.yr, self.zr, self.wr, self.SIZES, self.LIMALPHA)
-        anglesL = starkit.alpha_calculation(self.xtl, -self.ytl, self.ztl, self.xl, -self.yl, self.zl, self.wl, self.SIZES, self.LIMALPHA)
+        anglesR = self.solve_leg('right', self.xtr, self.ytr, self.ztr, self.xr, self.yr, self.zr, self.wr, self.SIZES, self.LIMALPHA)
+        anglesL = self.solve_leg('left', self.xtl, -self.ytl, self.ztl, self.xl, -self.yl, self.zl, self.wl, self.SIZES, self.LIMALPHA)
         if len(anglesR) > 1:
             for i in range(len(anglesR)):
                 if len(anglesR) == 1:
@@ -272,7 +271,6 @@ class GaitAlgorithms:
             if not self.falling_Flag == 0:
                 return
             if len(angles) == 0:
-                print('bad_ik_calc:', 'iii = ', iii, 'xtr:', self.xtr, 'ytr:', self.ytr, 'ztr:', self.ztr, 'xtl:', self.xtl, 'ytl:', self.ytl, 'ztl:', self.ztl)
                 self.exitFlag = self.exitFlag + 1
             else:
                 joint_number = len(angles)

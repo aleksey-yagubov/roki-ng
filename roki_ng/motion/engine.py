@@ -2,12 +2,14 @@
 
 from .gait import GaitAlgorithms
 from .model import Robot
-from ..wire import Fault
+import logging
 
 
 class Engine(Robot, GaitAlgorithms):
-    def __init__(self, parameters):
+    def __init__(self, parameters, log=None):
         Robot.__init__(self)
+        self.log = log or (lambda level, message: logging.getLogger(__name__).log(
+            getattr(logging, level), message))
         self.configure(parameters)
         self.simThreadCycleInMs = 20
         self.initPoses = 20
@@ -38,8 +40,16 @@ class Engine(Robot, GaitAlgorithms):
         # Recovery is explicit in the worker. Never launch a get-up slot implicitly.
         return 0
 
-    def computeAlphaForWalk(self, hands_on=True):
-        result = super().computeAlphaForWalk(hands_on)
+    def solve_leg(self, leg, *args):
+        import starkit
+
+        result = starkit.alpha_calculation(*args)
         if not result:
-            raise Fault("inverse_kinematics", "No valid leg solution; movement stopped")
+            x, y, z, nx, ny, nz, yaw, sizes, limits = args
+            self.log("WARNING", f"IK frame skipped: {leg} leg has no valid solution "
+                     f"for requested pose and joint limits; "
+                     f"position_mm=({x:.6g}, {y:.6g}, {z:.6g}), "
+                     f"orientation=({nx:.6g}, {ny:.6g}, {nz:.6g}), yaw={yaw:.6g}, "
+                     f"sizes={sizes}, limits={limits}. "
+                     "Solver provides no detailed failure reason; gait continues")
         return result
