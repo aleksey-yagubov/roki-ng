@@ -24,6 +24,7 @@ class Engine(Robot, GaitAlgorithms):
         self.ztr = self.ztl = -self.gaitHeight
 
     def configure(self, values):
+        self.stepHeight = values["motion.step_height_mm"]
         self.frames_per_cycle = values["motion.frames_per_cycle"]
         self.motion_shift_correction_x = -values["motion.shift_x_mm"] / 21
         self.motion_shift_correction_y = -values["motion.shift_y_mm"] / 21

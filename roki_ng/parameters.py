@@ -21,6 +21,7 @@ SCHEMA = {
     "logging.stdout_enabled": ("bool", False, None, None, "live", "Mirror runtime logs to supervisor stdout"),
     "motion.max_step_mm": ("float", 24.0, 1, 64, "next_job", "Forward stride scale"),
     "motion.max_side_mm": ("float", 12.0, 1, 20, "next_job", "Side stride scale"),
+    "motion.step_height_mm": ("float", 40.0, 0, 60, "next_job", "Walking foot lift above the ground, mm; not a physical safety limit"),
     "motion.max_yaw_rad": ("float", 0.15, 0, 0.3, "next_job", "Rotation per walking cycle"),
     "motion.frame_ms": ("int", 20, 10, 40, "restart", "Motherboard body queue period"),
     "motion.frames_per_cycle": ("int", 2, 1, 10, "restart", "Servo interpolation frames per gait frame"),

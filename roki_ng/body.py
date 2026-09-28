@@ -292,6 +292,7 @@ class Body:
             self.drive = None
             self.plan = self.instruction = None
             self.pose = "unknown"
+            self.engine = None
             try:
                 self.hardware.reset()
             except Exception as exc:
@@ -379,9 +380,10 @@ class Body:
         raise Fault("not_supported", op)
 
     def _start(self, op, plan, details=None):
-        if not self.simulated and op in ("motion.drive", "motion.kick"):
-            self._engine()
         self.hardware.prepare_motion()
+        if op == "test.start":
+            self.engine = None
+            self.pose = "unknown"
         ident = uuid.uuid4().hex
         self.active, self.plan = ident, iter(plan)
         self.stop_requested = False
@@ -480,6 +482,7 @@ class Body:
                 self._link_lost(exc)
                 return
             self.pose = "unknown"
+            self.engine = None
             self.error = str(exc)
             try:
                 self.hardware.reset()
@@ -523,6 +526,9 @@ class Body:
         if name == "stand" and self.pose == "unknown":
             yield from self._pose("base_stand")
             return
+        if name == "crouch":
+            # Entering gait from another pose must not reuse its foot geometry.
+            self.engine = None
         if name == "base_stand":
             rows = json.loads((ASSETS / "slots/Initial_Pose.json").read_text())["Initial_Pose"]
             yield from self._slot(rows)
@@ -530,8 +536,6 @@ class Body:
         elif self.simulated:
             yield "sleep", 0.08
         elif name == "crouch":
-            # A new engine discards unfinished gait geometry after a hard stop.
-            self.engine = None if self.pose == "unknown" else self.engine
             yield from self._engine().walk_Initial_Pose(start_mixing=False)
             yield "drain",
         elif name == "stand":
@@ -540,6 +544,8 @@ class Body:
             yield from self._engine().walk_Final_Pose()
             yield "drain",
         self.pose = name
+        if name in ("stand", "base_stand"):
+            self.engine = None
 
     def _walk(self, cycles=None, fixed=None):
         if self.pose != "crouch":
@@ -575,6 +581,8 @@ class Body:
             yield from self._pose("stand")
 
     def _kick(self, leg, power, offset):
+        self.engine = None
+        self.pose = "unknown"
         if self.simulated:
             yield "sleep", 0.15
         else:
@@ -583,6 +591,7 @@ class Body:
             yield from engine.kick(leg == "right", kick_offset=offset)
             yield "drain",
         self.pose = "stand"
+        self.engine = None
 
     def _validate_rows(self, rows, factor=1):
         if not isinstance(rows, list) or not 1 <= len(rows) <= 2048:
@@ -598,6 +607,7 @@ class Body:
     def _slot(self, rows, factor=1, *, legs_only=False):
         self._validate_rows(rows, factor)
         self.pose = "unknown"
+        self.engine = None
         for row in rows:
             values = []
             for index, angle in enumerate(row[1:]):

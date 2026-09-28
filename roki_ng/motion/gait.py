@@ -320,8 +320,9 @@ class GaitAlgorithms:
             self.xr, self.xl = (self.params['BODY_TILT_AT_WALK'], self.params['BODY_TILT_AT_WALK'])
         for j in range(self.initPoses):
             start1 = time.perf_counter()
-            self.ztr = -self.gaitHeight - (j + 1) * (233.0 - self.gaitHeight) / self.initPoses
-            self.ztl = -self.gaitHeight - (j + 1) * (233.0 - self.gaitHeight) / self.initPoses
+            # Leave extension margin below the 221.8 mm model length.
+            self.ztr = -self.gaitHeight - (j + 1) * (215.0 - self.gaitHeight) / self.initPoses
+            self.ztl = -self.gaitHeight - (j + 1) * (215.0 - self.gaitHeight) / self.initPoses
             self.ytr = -self.d10 - (self.initPoses - (j + 1)) * self.amplitude / 2 / self.initPoses
             self.ytl = self.d10 - (self.initPoses - (j + 1)) * self.amplitude / 2 / self.initPoses
             if j == self.initPoses - 1:

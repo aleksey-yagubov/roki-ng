@@ -7,6 +7,31 @@ import pytest
 from roki_ng.parameters import Parameters
 
 
+def test_step_height_parameter(tmp_path):
+    from roki_ng.body import Body
+    from roki_ng.wire import Fault
+
+    params = Parameters(tmp_path)
+    key = "motion.step_height_mm"
+    assert params.describe(key)["apply"] == "next_job"
+    assert params.values[key] == 40
+    body = Body({"simulate": True, "parameters": dict(params.values)},
+                lambda *a: None, lambda *a: None)
+    engine = body._engine()
+    assert engine.stepHeight == 40
+    body.command("params.apply", {key: 32})
+    assert engine.stepHeight == 32
+    body.active = "running-test"
+    with pytest.raises(Fault, match="Stop motion"):
+        body.command("params.apply", {key: 20})
+    assert engine.stepHeight == body.parameters[key] == 32
+    params.set(key, 32)
+    assert Parameters(tmp_path).values[key] == 32
+    for value in (-1, 61, float("nan")):
+        with pytest.raises(Fault):
+            params.set(key, value)
+
+
 def test_gait_yields_commands_without_legacy_imports(monkeypatch, tmp_path):
     # Fake only the native IK solver: exercise real geometry/state/control-flow.
     monkeypatch.setitem(sys.modules, "starkit", SimpleNamespace(alpha_calculation=lambda *a: [[0.0] * 6]))
