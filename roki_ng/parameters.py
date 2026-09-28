@@ -4,6 +4,9 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import copy
+
+from . import field_config
 
 from .wire import Fault, number, boolean
 
@@ -18,6 +21,16 @@ COLOUR_DEFAULTS = {
 }
 
 SCHEMA = {
+    'camera.exposure_us': ('int',8000,1,100000,'next_request','Manual exposure in microseconds; must fit frame period'),
+    'camera.analogue_gain': ('float',1.,1.,16.,'next_request','Manual analogue gain'),
+    'camera.ae_enabled': ('bool',False,None,None,'next_request','Automatic exposure; manual values retained when enabled'),
+    'camera.awb_enabled': ('bool',False,None,None,'next_request','Automatic white balance; manual values retained when enabled'),
+    'localisation.camera_height_m': ('float',.4068,.2,.8,'next_localisation','Optical centre height; nominal default, measure for robot posture'),
+    'vision.field_auto': ('bool',True,None,None,'next_frame','Adaptive paint segmentation; false uses saved LAB thresholds'),
+    'vision.field_auto_contrast': ('int',15,0,100,'next_frame','Minimum adaptive white/turf L contrast in OpenCV 0..255 units'),
+    **{key: ('object', value, None, None, 'next_localisation', 'Field geometry; metres/radians')
+       for key,value in field_config.DEFAULTS.items()},
+    'match.own_goal': ('int',0,0,1,'next_localisation','Own goal ID; changing sides does not rotate the map'),
     **{f"camera.white_balance.{colour}_gain":
        ("float", 1.0, 0.01, 32.0, "next_request",
         f"Manual white balance {colour} gain; calibrate for venue lighting")
@@ -68,7 +81,7 @@ def validate_colour_ranges(values):
 class Parameters:
     def __init__(self, directory):
         self.path = Path(directory) / "parameters.json"
-        self.values = {k: v[1] for k, v in SCHEMA.items()}
+        self.values = {k: copy.deepcopy(v[1]) for k, v in SCHEMA.items()}
         self.extra = {}
         if self.path.exists():
             stored = json.loads(self.path.read_text())
@@ -86,11 +99,14 @@ class Parameters:
         if key not in SCHEMA:
             raise Fault("not_found", f"Unknown parameter: {key}")
         kind, default, low, high, apply, description = SCHEMA[key]
-        return dict(key=key, type=kind, default=default, min=low, max=high,
+        result=dict(key=key, type=kind, default=copy.deepcopy(default), min=low, max=high,
                     apply=apply, description=description)
+        if key in field_config.FIELDS:result['fields']=field_config.FIELDS[key]
+        return result
 
     def validate(self, key, value):
         meta = self.describe(key)
+        if key in field_config.FIELDS:return field_config.validate(key,value)
         if meta["type"] == "bool":
             return boolean({key: value}, key)
         return number({key: value}, key, None, meta["min"], meta["max"], meta["type"] == "int")

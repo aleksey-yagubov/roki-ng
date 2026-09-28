@@ -397,8 +397,27 @@ Simulation проверяет последовательности и прото
 0.01..32, `apply=next_request`. Значения сохраняются на роботе и применяются
 при старте либо через следующий свободный libcamera Request без перезапуска
 активного захвата. Подтверждение команды не означает немедленного изменения
-кадров в ISP. AE/AWB остаются выключенными. Defaults 1/1 не являются калибровкой.
+кадров в ISP. AE/AWB выключены по умолчанию. Defaults 1/1 не являются калибровкой.
 Direct-gst эти параметры не использует. Проверка: [WHITE_BALANCE_FIX.md](WHITE_BALANCE_FIX.md).
+
+Дополнительно через `params.*`: `camera.exposure_us` (default 8000),
+`camera.analogue_gain` (1.0), `camera.ae_enabled` и `camera.awb_enabled` (false).
+Все — next_request, с проверкой периода кадра и аппаратного диапазона.
+
+`camera.controls.freeze {group:"exposure"|"white_balance"|"all",lease_epoch}`
+фиксирует метаданные последнего завершённого кадра runtime. Требуются running и
+measured_age_ms<=1000; отсутствующие значения не заменяются defaults. Для exposure
+сохраняются exposure_us/gain и ae_enabled=false, для white_balance — red/blue gain
+и awb_enabled=false. Ответ: `{values:{...},source_sequence:N}`. Применение и
+сохранение используют общий batch параметров; при ошибке записи восстанавливаются
+реальные предыдущие camera-controls, включая временные camera.start overrides.
+Операция требует lease и не перезапускает pipeline. Пока нет свежих метаданных,
+отвечает not_ready; недопустимые численные метаданные отклоняются валидацией.
+При включённой автоматике ручные значения сохраняются, но не являются измерением
+её результата. `camera.status` содержит requested_controls и measured_controls
+(sequence, sensor_timestamp_ns, exposure_us, gain, colour_gains); при остановке
+измерение null. Отсутствующая метадата также null. Явные exposure_us/gain в
+camera.start имеют приоритет над сохранёнными настройками на этот захват.
 
 `camera.start` открывает отдельный camera-worker для будущей детекции и
 локализации. Это не команда отправки RTP оператору. Нужны MANUAL и lease:
@@ -623,7 +642,13 @@ severity произвольного текста нельзя. Structured faults
 
 `params.keys {prefix?,offset?,limit?}` возвращает ключи. `params.describe {key}`
 возвращает key, type (int/float/bool), default, min/max, apply, description.
-`params.get {key}` возвращает key/value. `params.set {key,value,lease_epoch}`
+`params.get {key}` возвращает key/value.
+`params.get {keys:[key,...]}` возвращает `{values:{key:value,...}}`: 1..16 уникальных
+ключей, один согласованный снимок под блокировкой параметров. Lease не требуется.
+Неизвестный ключ отклоняет весь запрос; дубликаты, пустой список и смешение key/keys
+дают invalid_argument. Ответ ограничен 1200 байтами: при too_large уменьшите группу.
+Чтение поддерживает scalar и object; GUI читает scalar-значения страницами по 8.
+ `params.set {key,value,lease_epoch}`
 валидирует значение и возвращает key/value/apply. Нет передачи файлов и патчей.
 
 `live` применяется сразу, `next_job` требует отсутствие активного движения,
@@ -678,3 +703,91 @@ MessagePack sample с bbox/rotated rectangle/circle/text, привязка по 
 requested datastream, не OSD. Direct-gst не требует IMU и не сбрасывает strobe
 контейнер ради видео; reset STM counter обязателен при запуске
 синхронизированного runtime camera pipeline.
+# Диагностическая локализация — локальная реализация 28.09.2026
+
+Следующие расширения добавлены в исходники; наличие на конкретной голове
+проверять через `system.operations`/`system.capabilities`. До установки новой
+версии сервиса они недоступны. Capabilities: `localisation.mode=diagnostic_only`,
+`localisation.motion_pose=false`.
+
+| Операция | Аргументы | Условия |
+| --- | --- | --- |
+| localisation.start | prior: [x_m, y_m, yaw_rad] | Lease, MANUAL, runtime camera running и IMU synced |
+| localisation.stop | {} | Lease |
+| localisation.status | {} | Read-only |
+
+Старт не запускает камеру и не двигает голову. Начальная гипотеза относится к
+карте с началом в центре поля; x вдоль длины, y влево. Размеры поступают из
+field.geometry, default 3,35×2,35 м. Worker проверяет профиль оптики в
+`STATE_DIR/localisation/profile.json`, schema=1, capture_size=[800,650]. Высота
+берётся из `localisation.camera_height_m` (default 0.4068, диапазон 0.2..0.8).
+Рядом должны быть три legacy npy: Camera_calibration_P, Camera_calibration_map1,
+Camera_calibration_map2. Профиль пока не редактируется этим API.
+
+`localisation.state` доступен через существующий requested datastream. Состояние
+содержит mode, running, capture_id (идентификатор запуска локализатора), frames,
+dropped, age_ms, error и result. В result: frame_sequence, imu_sequence,
+sensor_timestamp_ns, processing_ms, candidate=[x,y,yaw] или null, valid=false,
+reason; при достаточных наблюдениях также lines, circle, median_residual_m,
+inlier_fraction, ess. Отсутствие result и null candidate — не нулевая позиция.
+
+`result.goal_candidates` — до четырёх диагностических цветных стоек (до двух
+каждого цвета): `colour=blue|yellow`, `rect=[x,y,w,h]`, `foot_px=[u,v]`,
+`metric_valid=false`. Координаты относятся к исходному BGR-кадру 800×650,
+до исправления дисторсии. `foot_px` — нижняя точка цветового компонента,
+**не подтверждённое касание стойки с полом**. Цвета и соседство с основной
+зелёной областью используются для отсева фона. Эти кандидаты пока не участвуют
+в весах частиц; пустой список не означает, что ворот нет. Порог цвета ворот
+берётся из `vision.blue_posts.*`/`vision.yellow_posts.*` в LAB.
+`vision.field_auto=true` включает адаптивную сегментацию (диапазон зелёного —
+ограничение кластеров); false использует сохранённые зелёные/белые LAB-пороги.
+Изменения vision.* доходят до детектора и локализатора; результат старой ревизии
+цветовых параметров после обновления не публикуется.
+
+## Геометрия поля через существующие params
+
+`params.set {values:{key:value,...},expected_values?:{key:old,...},lease_epoch}`
+сохраняет 1..16 известных scalar-параметров одной группой, ответ `{values:{...}}`.
+Это пакетный формат существующего params.set, отдельной команды params.set_many нет.
+Смешение key/value/expected_value с values/expected_values запрещено.
+Одиночный формат и его ответ key/value/apply не изменены.
+Объекты field.* сюда не входят. Проверяются типы и итоговые LAB min/max до
+применения worker-ами и атомарного сохранения файла. expected_values, если задан,
+должен содержать точно те же ключи; несовпадение даёт conflict. Действует общий
+лимит UDP 1200 байт. Эта операция нужна для одновременной смены границ LAB и
+настроек камеры, отдельный параллельный config store не создаётся.
+
+Новый тип `object` в params.describe содержит `fields`: boolean обозначается
+строкой bool, числовой диапазон парой [min,max], перечисление списком строк.
+params.set передаёт весь объект value целиком; частичных объектов нет.
+Необязательное `expected_value` проверяется под блокировкой параметров и при
+несовпадении даёт conflict. Старый scalar API сохраняется.
+
+- `field.geometry`: length, width, carpet_length, carpet_width,
+  circle_diameter, circle_measured, paint_width.
+- `field.goal.0`, `field.goal.1`: x, y (центр основания), width (проём), height,
+  colour (yellow/blue/white/unknown), measured.
+- `field.mark.00` .. `field.mark.15`: enabled, kind (cross/ring/disk/line),
+  x, y, size, size2, angle, width. size — диаметр кольца/диска или длина отрезка/
+  первого плеча; size2 — второе плечо креста. Координаты центров в м, угол в рад.
+- `match.own_goal`: 0 или 1; чужие ворота — другой ID. Смена не вращает карту.
+
+Для этих параметров apply=next_localisation. Каждый объект независимо сохраняется
+атомарно; GUI редактирует локальный черновик до кнопки сохранения. Это **не**
+атомарное переключение целого многокомпонентного профиля: завершите сохранение
+всех объектов перед новым localisation.start. Worker берёт снимок всей карты
+на старте. Число меток ограничено 16, сообщения помещаются в UDP_LIMIT=1200.
+Сервер — источник defaults; 0.5 м диаметр центра и 1.0×0.6 м ворота являются
+шаблонными размерами с measured=false, не измерением текущего поля.
+
+Фильтр использует прямоугольник/среднюю линию выбранного размера, отрезки/кресты
+как модель линий и дополнительные кольца как альтернативные ассоциации центра.
+Диски и геометрия ворот пока только сохраняются/рисуются, не дают метрических
+весов. Детектор коротких крестов/дисков отдельно ещё не реализован.
+
+**valid всегда false в этой версии**, включая внешний valid datastream.
+Рабочая калибровка camera-to-body и точность ещё не подтверждены. Кандидат нельзя
+использовать для движения; predicted-поза и одометрия не реализованы. При возрасте
+более 1500 мс reason=stale. Остановка камеры останавливает локализатор; повторный
+старт требует новой синхронизации. Падение диагностического worker не отзывает
+ручное управление. Для подключения к игре нужна следующая проверенная версия.

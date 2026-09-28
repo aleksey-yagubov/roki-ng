@@ -95,3 +95,26 @@ def test_persistence_failure_rolls_worker_back(tmp_path):
         assert worker.call.call_args_list[-1].args == ('params.apply', {RED: 1.0, BLUE: 1.0})
         assert Parameters(tmp_path).values[RED] == 1.0
     asyncio.run(run())
+
+
+def test_exposure_and_auto_controls_use_recycled_request():
+    c=camera({})
+    c.camera.controls={name:NS(min=low,max=high) for name,low,high in
+                       [('wb',.01,32),('exposure',1,20000),('gain',1,16),('ae',False,True),('awb',False,True)]}
+    c.command('camera.start',{})
+    stream=object();c.stream=stream
+    req=Mock(status='complete',buffers={stream:NS(metadata=NS(status='success'))})
+    c.manager=NS(get_ready_requests=lambda:[req]);c._publish=Mock()
+    c.command('params.apply',{'camera.exposure_us':9000,'camera.analogue_gain':2.,'camera.awb_enabled':True})
+    c.ready(0)
+    assert dict(call.args for call in req.set_control.call_args_list)=={'exposure':9000,'gain':2.,'awb':True}
+    assert c.camera.start.call_count==1
+    c.camera.stop.assert_not_called()
+    before=req.set_control.call_count;c.ready(0)
+    assert req.set_control.call_count==before
+
+
+def test_exposure_longer_than_frame_is_rejected_atomically():
+    c=camera({});c.camera.controls={'wb':NS(min=.01,max=32)}
+    with pytest.raises(Fault):c.command('params.apply',{'camera.exposure_us':20000,RED:2.})
+    assert c.exposure==8000 and c.white_balance==(1.,1.) and not c.pending_controls

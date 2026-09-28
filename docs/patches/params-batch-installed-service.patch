@@ -1,0 +1,54 @@
+--- a/roki_ng/supervisor.py
++++ b/roki_ng/supervisor.py
+@@ -453,6 +453,15 @@
+             if not isinstance(prefix, str):
+                 raise Fault("invalid_argument", "prefix must be a string")
+             return page(sorted(k for k in SCHEMA if k.startswith(prefix)), body)
++        if op == "params.get" and "keys" in body:
++            keys = body["keys"]
++            if ("key" in body or not isinstance(keys, list) or not 1 <= len(keys) <= 16
++                    or any(not isinstance(k, str) for k in keys) or len(set(keys)) != len(keys)):
++                raise Fault("invalid_argument", "Provide 1..16 distinct keys, without key")
++            async with self.parameter_lock:
++                for key in keys:
++                    self.params.describe(key)
++                return {"values": {key: self.params.values[key] for key in keys}}
+         if op in ("params.get", "params.describe"):
+             key = body.get("key")
+             meta = self.params.describe(key)
+@@ -460,8 +469,22 @@
+         if op not in READ_ONLY and op not in ("video.status", "video.stop", "video.destroy"):
+             self.require_control(session, body)
+         if op == "params.set":
++            if "values" in body:
++                values, expected = body["values"], body.get("expected_values")
++                if any(k in body for k in ("key", "value", "expected_value")):
++                    raise Fault("invalid_argument", "Do not mix single and batch formats")
++                if not isinstance(values, dict) or not 1 <= len(values) <= 16:
++                    raise Fault("invalid_argument", "Provide 1..16 scalar parameters")
++                if any(k not in SCHEMA or SCHEMA[k][0] == "object" for k in values):
++                    raise Fault("invalid_argument", "Batch supports known scalar parameters only")
++                if expected is not None and (not isinstance(expected, dict) or set(expected) != set(values)):
++                    raise Fault("invalid_argument", "expected_values must cover exactly values")
++                return {"values": await self._set_parameters(values, expected=expected)}
++            if "expected_values" in body:
++                raise Fault("invalid_argument", "expected_values requires values")
+             key, value = body.get("key"), body.get("value")
+-            values = await self._set_parameters({key: value})
++            expected = {key: body['expected_value']} if 'expected_value' in body else None
++            values = await self._set_parameters({key: value}, expected=expected)
+             return {"key": key, "value": values[key], "apply": SCHEMA[key][4]}
+         if op == "test.measure":
+             job = await self.workers["motherboard"].call("job.status", {"job_id": body.get("job_id")})
+@@ -620,8 +643,10 @@
+             if session is not None and session is self.capture_session:
+                 await self._stop_capture()
+ 
+-    async def _set_parameters(self, values):
++    async def _set_parameters(self, values, expected=None):
+         async with self.parameter_lock:
++            if expected is not None and any(self.params.values.get(k) != v for k, v in expected.items()):
++                raise Fault("conflict", "Parameter changed; reload before saving")
+             values = {k: self.params.validate(k, v) for k, v in values.items()}
+             validate_colour_ranges(self.params.values | values)
+             applied = []

@@ -15,7 +15,8 @@ from .platform import Bootstrap
 from .wire import Fault, UDP_LIMIT, envelope, number, boolean, pack, page, udp_socket, unpack
 
 OPS = (
-    "camera.start", "camera.stop", "camera.status",
+    "localisation.start", "localisation.stop", "localisation.status",
+    "camera.start", "camera.stop", "camera.status", "camera.controls.freeze",
     "detection.list", "detection.start", "detection.stop", "detection.status",
     "session.heartbeat", "session.close", "system.status", "system.capabilities", "system.operations",
     "system.restart_stream_worker", "control.acquire", "control.release", "mode.set",
@@ -28,13 +29,14 @@ OPS = (
     "log.sources", "log.snapshot", "log.subscribe", "log.update", "log.unsubscribe",
 )
 READ_ONLY = {
+    "localisation.status",
     "camera.status",
     "detection.list", "detection.status",
     "motion.slots", "test.list", "test.describe", "job.status", "camera.capabilities", "video.capabilities",
     "params.keys", "params.describe", "params.get", "system.status", "system.capabilities",
     "system.operations", "session.heartbeat", "session.close",
 }
-TOPICS = ("system.workers", "motion.state", "camera.state", "detection.state")
+TOPICS = ("system.workers", "motion.state", "camera.state", "detection.state", "localisation.state")
 LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
 REQUEST_WINDOW = 128
 
@@ -124,7 +126,7 @@ class Supervisor:
             if not self.config.get("simulate") and not self.config.get("skip_bootstrap"):
                 self.bootstrap = Bootstrap(self.config)
                 await asyncio.to_thread(self.bootstrap.start)
-            for role in ("motherboard", "stream", "camera", "detection"):
+            for role in ("motherboard", "stream", "camera", "detection", "localisation"):
                 worker = WorkerPeer(role, self.config | {"parameters": dict(self.params.values)}, self.worker_event, self.log)
                 self.workers[role] = worker
                 await worker.start()
@@ -192,6 +194,9 @@ class Supervisor:
             self.spawn(self._save_calibration(body))
             return
         if op == "worker.fault" and not self.closing:
+            if role == "localisation":
+                self.log(role, "ERROR", body.get("error", "Localisation worker failed"))
+                return  # Diagnostic failure must not revoke manual control.
             self.mode = "FAULT"
             self.log(role, "ERROR", body.get("error", "worker failed"))
             if role in ("camera", "motherboard"):
@@ -412,6 +417,7 @@ class Supervisor:
                     "video_backends": ["direct-gst", "runtime"], "data_topics": list(TOPICS),
                     "capture_backends": ["libcamera-iceoryx2"],
                     "detectors": ["colour_blobs"],
+                    "localisation": {"mode": "diagnostic_only", "motion_pose": False},
                     "future": ["osd", "game", "servo-parameters"],
                     "hardware_slots": False, "simulated": bool(self.config.get("simulate"))}
         if op == "system.status":
@@ -453,6 +459,15 @@ class Supervisor:
             if not isinstance(prefix, str):
                 raise Fault("invalid_argument", "prefix must be a string")
             return page(sorted(k for k in SCHEMA if k.startswith(prefix)), body)
+        if op == "params.get" and "keys" in body:
+            keys = body["keys"]
+            if ("key" in body or not isinstance(keys, list) or not 1 <= len(keys) <= 16
+                    or any(not isinstance(k, str) for k in keys) or len(set(keys)) != len(keys)):
+                raise Fault("invalid_argument", "Provide 1..16 distinct keys, without key")
+            async with self.parameter_lock:
+                for key in keys:
+                    self.params.describe(key)
+                return {"values": {key: self.params.values[key] for key in keys}}
         if op in ("params.get", "params.describe"):
             key = body.get("key")
             meta = self.params.describe(key)
@@ -460,9 +475,43 @@ class Supervisor:
         if op not in READ_ONLY and op not in ("video.status", "video.stop", "video.destroy"):
             self.require_control(session, body)
         if op == "params.set":
+            if "values" in body:
+                values, expected = body["values"], body.get("expected_values")
+                if any(k in body for k in ("key", "value", "expected_value")):
+                    raise Fault("invalid_argument", "Do not mix single and batch formats")
+                if not isinstance(values, dict) or not 1 <= len(values) <= 16:
+                    raise Fault("invalid_argument", "Provide 1..16 scalar parameters")
+                if any(k not in SCHEMA or SCHEMA[k][0] == "object" for k in values):
+                    raise Fault("invalid_argument", "Batch supports known scalar parameters only")
+                if expected is not None and (not isinstance(expected, dict) or set(expected) != set(values)):
+                    raise Fault("invalid_argument", "expected_values must cover exactly values")
+                return {"values": await self._set_parameters(values, expected=expected)}
+            if "expected_values" in body:
+                raise Fault("invalid_argument", "expected_values requires values")
             key, value = body.get("key"), body.get("value")
-            values = await self._set_parameters({key: value})
+            expected = {key: body['expected_value']} if 'expected_value' in body else None
+            values = await self._set_parameters({key: value}, expected=expected)
             return {"key": key, "value": values[key], "apply": SCHEMA[key][4]}
+        if op == 'camera.controls.freeze':
+            from .wire import choice
+            group=choice(body,'group','all',('all','exposure','white_balance'))
+            async with self.capture_lock:
+                self.require_control(session,body)
+                state=await self.workers['camera'].call('camera.status')
+                measured=state.get('measured_controls');age=state.get('measured_age_ms')
+                if not state.get('running') or not measured or age is None or age>1000:
+                    raise Fault('not_ready','Fresh runtime camera metadata required')
+                values={}
+                if group in ('all','exposure'):
+                    values.update({'camera.ae_enabled':False,'camera.exposure_us':measured.get('exposure_us'),
+                                   'camera.analogue_gain':measured.get('gain')})
+                if group in ('all','white_balance'):
+                    gains=measured.get('colour_gains')
+                    if not isinstance(gains,(list,tuple)) or len(gains)!=2:
+                        raise Fault('not_ready','ColourGains metadata unavailable')
+                    values.update({'camera.awb_enabled':False,'camera.white_balance.red_gain':gains[0],
+                                   'camera.white_balance.blue_gain':gains[1]})
+                return {'values':await self._set_parameters(values),'source_sequence':measured['sequence']}
         if op == "test.measure":
             job = await self.workers["motherboard"].call("job.status", {"job_id": body.get("job_id")})
             if job["operation"] != "test.start" or job["status"] != "completed":
@@ -511,6 +560,23 @@ class Supervisor:
                 return await self.workers["motherboard"].call(op, body)
         if op == "camera.status":
             return await self.workers["camera"].call(op)
+        if op == "localisation.status":
+            return await self.workers["localisation"].call(op)
+        if op in ("localisation.start", "localisation.stop"):
+            async with self.capture_lock:
+                self.require_control(session, body)
+                if op == "localisation.stop":
+                    return await self.workers["localisation"].call(op)
+                if self.mode != "MANUAL":
+                    raise Fault("invalid_state", "Select MANUAL mode")
+                camera = await self.workers["camera"].call("camera.status")
+                sync = camera.get("imu_sync", {})
+                if not camera.get("running") or sync.get("state") != "synced":
+                    raise Fault("not_ready", "A synchronized camera is required")
+                return await self.workers["localisation"].call(op, {
+                    "prior": body.get("prior"), "unicam_minus_stm": sync["unicam_minus_stm"],
+                    "capture_id": uuid.uuid4().hex,
+                    "parameters": dict(self.params.values)}, timeout=5)
         if op == "detection.list":
             return {"detector": "colour_blobs", "profiles": list(COLOUR_DEFAULTS),
                     "max_blobs": 4, "coordinates": "image_pixels", "classifies_ball": False}
@@ -585,6 +651,11 @@ class Supervisor:
     async def _stop_capture(self):
         self.capture_session = None
         self.alignment_pending.clear()
+        if "localisation" in self.workers:
+            try:
+                await self.workers["localisation"].call("localisation.stop")
+            except Fault as exc:
+                self.log("supervisor", "WARNING", f"Localisation stop: {exc}")
         try:
             await self.workers["detection"].call("detection.stop")
         except Fault as exc:
@@ -620,18 +691,26 @@ class Supervisor:
             if session is not None and session is self.capture_session:
                 await self._stop_capture()
 
-    async def _set_parameters(self, values):
+    async def _set_parameters(self, values, expected=None):
         async with self.parameter_lock:
+            if expected is not None and any(self.params.values.get(k)!=v for k,v in expected.items()):
+                raise Fault('conflict','Parameter changed; reload before saving')
             values = {k: self.params.validate(k, v) for k, v in values.items()}
             validate_colour_ranges(self.params.values | values)
             applied = []
             try:
                 for role, mode in (("motherboard", "next_job"), ("detection", "next_frame"),
+                                   ("localisation", "next_frame"),
                                    ("camera", "next_request")):
                     update = {k: v for k, v in values.items() if SCHEMA[k][4] == mode}
+                    if role=='localisation' and role not in self.workers:continue
                     if update:
                         previous = {k: self.params.values[k] for k in update}
-                        await self.workers[role].call("params.apply", update)
+                        response=await self.workers[role].call("params.apply", update)
+                        # Camera.start may override persistent manual values for
+                        # this capture. Roll back the actual controls, not defaults.
+                        if role=='camera' and isinstance(response,dict) and set(response.get('previous',{}))==set(update):
+                            previous=response['previous']
                         applied.append((role, previous))
                 return await asyncio.to_thread(self.params.set_many, values)
             except Exception:
@@ -660,16 +739,21 @@ class Supervisor:
     def _snapshot(self, topic):
         if topic == "system.workers":
             return {k: {"alive": w.alive, "state": w.state.get("state")} for k, w in self.workers.items()}
-        role = {"motion.state": "motherboard", "camera.state": "stream", "detection.state": "detection"}.get(topic)
+        role = {"motion.state": "motherboard", "camera.state": "stream", "detection.state": "detection", "localisation.state": "localisation"}.get(topic)
         if role is None:
             raise Fault("not_found", "Unknown topic")
         worker = self.workers.get(role)
         return dict(worker.state) if worker else {"state": "starting"}
 
     def _sample(self, topic):
-        role = {"motion.state": "motherboard", "camera.state": "stream", "detection.state": "detection"}.get(topic)
+        role = {"motion.state": "motherboard", "camera.state": "stream", "detection.state": "detection", "localisation.state": "localisation"}.get(topic)
         worker = self.workers.get(role)
         observed = worker.last_heartbeat if worker else time.monotonic()
+        if topic == "localisation.state":
+            return {"topic": topic, "valid": False,
+                    "source_mono_ns": int(observed * 1e9),
+                    "age_ms": round((time.monotonic() - observed) * 1000),
+                    "data": self._snapshot(topic)}
         return {"topic": topic, "valid": bool(worker.alive) if worker else topic == "system.workers",
                 "source_mono_ns": int(observed * 1e9),
                 "age_ms": round((time.monotonic() - observed) * 1000), "data": self._snapshot(topic)}

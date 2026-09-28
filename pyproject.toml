@@ -9,6 +9,9 @@ description = "ROKI process-isolated manual runtime"
 requires-python = ">=3.11"
 dependencies = ["msgpack>=1.0"]
 
+[project.optional-dependencies]
+localisation = ["numpy>=2,<3", "opencv-python>=4.13,<6"]
+
 [project.scripts]
 roki-supervisor = "roki_ng.__main__:main"
 roki-client = "roki_ng.client:main"

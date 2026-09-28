@@ -83,6 +83,9 @@ def run(role, fds):
                         elif role == "detection":
                             from .detection import Detection
                             driver = Detection(body, emit, log)
+                        elif role == "localisation":
+                            from .localisation_worker import Localisation
+                            driver = Localisation(body, emit, log)
                         else:
                             raise Fault("invalid_argument", "Unknown worker")
                         response["result"] = driver.state()

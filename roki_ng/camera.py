@@ -10,10 +10,12 @@ import struct
 import time
 
 from .dataplane import Channel, FRAME_TOPIC, FRAME_HEADER, FRAME_BYTES
-from .wire import Fault, number
+from .wire import Fault, number, boolean
 from .synchronization import CaptureAlignment
 
 WB_KEYS = ("camera.white_balance.red_gain", "camera.white_balance.blue_gain")
+CONTROL_KEYS={'camera.exposure_us':'ExposureTime','camera.analogue_gain':'AnalogueGain',
+              'camera.ae_enabled':'AeEnable','camera.awb_enabled':'AwbEnable'}
 
 
 class Camera:
@@ -33,6 +35,12 @@ class Camera:
         values = config.get("parameters", {})
         self.white_balance = tuple(number(values, key, 1.0, 0.01, 32.0) for key in WB_KEYS)
         self.wb_pending = False
+        self.exposure=number(values,'camera.exposure_us',8000,1,100000,True)
+        self.gain=number(values,'camera.analogue_gain',1.,1.,16.)
+        self.ae=boolean(values,'camera.ae_enabled',False)
+        self.awb=boolean(values,'camera.awb_enabled',False)
+        self.pending_controls={}
+        self.measured=None
 
     def sync_state(self):
         if self.alignment is None:
@@ -47,19 +55,42 @@ class Camera:
                 "prepared": self.camera is not None, "frames": self.frames,
                 "bad_frames": self.bad_frames, "sequence": self.sequence,
                 "frame_duration_us": self.duration if self.camera is not None else None,
-                "error": self.error, "topic": FRAME_TOPIC, "imu_sync": self.sync_state()}
+                "error": self.error, "topic": FRAME_TOPIC, "imu_sync": self.sync_state(),
+                "requested_controls":{'exposure_us':self.exposure,'gain':self.gain,
+                    'ae_enabled':self.ae,'awb_enabled':self.awb,'colour_gains':self.white_balance},
+                "measured_controls":self.measured if self.running else None,
+                "measured_age_ms":round((time.monotonic()-self.last_frame)*1000) if self.running and self.measured else None}
 
     def command(self, op, args):
         if op == "params.apply":
-            if any(key not in WB_KEYS for key in args):
+            if any(key not in WB_KEYS and key not in CONTROL_KEYS for key in args):
                 raise Fault("invalid_argument", "Unknown camera parameter")
+            previous=dict(zip(WB_KEYS,self.white_balance)) | {
+                'camera.exposure_us':self.exposure,'camera.analogue_gain':self.gain,
+                'camera.ae_enabled':self.ae,'camera.awb_enabled':self.awb}
             pair = tuple(number(args, key, old, 0.01, 32.0)
                          for key, old in zip(WB_KEYS, self.white_balance))
             if self.camera is not None:
                 self._validate_white_balance(pair)
+            exposure=number(args,'camera.exposure_us',self.exposure,1,
+                            self.duration if self.camera is not None else 100000,True)
+            gain=number(args,'camera.analogue_gain',self.gain,1.,16.)
+            ae=boolean(args,'camera.ae_enabled',self.ae)
+            awb=boolean(args,'camera.awb_enabled',self.awb)
+            pending={}
+            for key,name in CONTROL_KEYS.items():
+                if key not in args:continue
+                if self.camera is not None:
+                    control=getattr(self.lc.controls,name)
+                    info=self.camera.controls.get(control)
+                    if info is None:raise Fault('not_supported',f'Camera does not expose {name}')
+                    if not info.min<=args[key]<=info.max:raise Fault('invalid_argument',f'{name}: outside sensor range')
+                pending[name]=args[key]
             self.white_balance = pair
-            self.wb_pending = True
-            return dict(zip(WB_KEYS, pair))
+            self.wb_pending = self.wb_pending or any(key in args for key in WB_KEYS)
+            self.exposure,self.gain,self.ae,self.awb=exposure,gain,ae,awb
+            self.pending_controls.update(pending)
+            return {'previous':{key:previous[key] for key in args}}
         if op == "camera.status":
             return self.state()
         if op == "camera.stop":
@@ -81,8 +112,8 @@ class Camera:
             if self.simulated:
                 raise Fault("not_supported", "Capture requires real libcamera")
             self.duration = number(args, "frame_duration_us", 16667, 8333, 100000, True)
-            self.exposure = number(args, "exposure_us", 8000, 1, self.duration, True)
-            self.gain = number(args, "gain", 1.0, 1.0, 16.0)
+            self.exposure = number(args, "exposure_us", self.exposure, 1, self.duration, True)
+            self.gain = number(args, "gain", self.gain, 1.0, 16.0)
             try:
                 self._prepare()
             except Exception:
@@ -96,11 +127,12 @@ class Camera:
                 self.alignment = CaptureAlignment(args["clock"], self.duration) if args.get("clock") else None
                 self.synced = False
                 c = self.lc.controls
-                self.camera.start({c.AeEnable: False, c.AwbEnable: False,
+                self.camera.start({c.AeEnable: self.ae, c.AwbEnable: self.awb,
                                    c.ColourGains: self.white_balance,
                                    c.ExposureTime: self.exposure, c.AnalogueGain: self.gain,
                                    c.FrameDurationLimits: (self.duration, self.duration)})
                 self.wb_pending = False
+                self.pending_controls={};self.measured=None
                 self.running = True
                 self.last_frame = time.monotonic()
                 self.started_at = self.last_frame
@@ -184,8 +216,11 @@ class Camera:
                 request.reuse()
                 if self.wb_pending:
                     request.set_control(self.lc.controls.ColourGains, self.white_balance)
+                for name,value in self.pending_controls.items():
+                    request.set_control(getattr(self.lc.controls,name),value)
                 self.camera.queue_request(request)
                 self.wb_pending = False
+                self.pending_controls={}
         except Exception as exc:
             self._fault(exc)
 
@@ -194,6 +229,11 @@ class Camera:
         stamp = request.metadata.get(self.lc.controls.SensorTimestamp)
         if not isinstance(sequence, int) or not 0 <= sequence <= 0xffffffff or not isinstance(stamp, int):
             raise Fault("camera_metadata", "Missing UnicamSequence or SensorTimestamp")
+        c=self.lc.controls
+        self.measured={'sequence':sequence,'sensor_timestamp_ns':stamp,
+                       'exposure_us':request.metadata.get(c.ExposureTime),
+                       'gain':request.metadata.get(c.AnalogueGain),
+                       'colour_gains':request.metadata.get(c.ColourGains)}
         if self.alignment:
             self.alignment.frame(sequence, stamp)
         if buffer.metadata.planes[0].bytes_used < 649 * self.stride + 2400:

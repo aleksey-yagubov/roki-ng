@@ -57,6 +57,22 @@
 
 ## Документы
 
+- [OPERATOR_FIELD_IMPLEMENTATION.md](OPERATOR_FIELD_IMPLEMENTATION.md): первый
+  реализованный этап редактора карты, общих параметров цвета и live controls;
+  результаты тестов и оставшаяся работа.
+
+- [Профили поля, зрения и камеры в операторе](superpowers/specs/2026-09-28-operator-field-vision-design.md):
+  требования к расширению существующих params и отдельного Qt GUI, графической
+  разметке поля и назначению своих/чужих ворот. Проект, не готовый интерфейс.
+
+- [LOCALISATION_RUNTIME_STATUS.md](LOCALISATION_RUNTIME_STATUS.md): исправление
+  формата OpenCV, диагностический worker, реальные замеры на CM4 и оставшиеся
+  условия допуска к игре (28.09.2026).
+
+- [LOCALISATION_EXPERIENCE_AND_INTEGRATION.md](LOCALISATION_EXPERIENCE_AND_INTEGRATION.md):
+  проверенный опыт камеры и локализации, ограничения, воспроизведение и пошаговая
+  инструкция переноса прототипа в runtime и GUI.
+
 - [GUI_AGENT_HANDOFF.md](GUI_AGENT_HANDOFF.md): точка входа агенту оператора,
   работающие команды и согласование следующих расширений.
 
