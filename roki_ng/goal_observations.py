@@ -41,3 +41,41 @@ def goal_candidates(image,parameters=None):
         candidates.sort(key=lambda item:item[0],reverse=True)
         results.extend(item[1] for item in candidates[:2])
     return results
+
+
+def paired_bearings(candidates,projector,quaternion):
+    """Require two spatially separate upright colour components, not one blob."""
+    result=[]
+    for colour in ('blue','yellow'):
+        posts=[p for p in candidates if p['colour']==colour]
+        if len(posts)!=2:continue
+        a,b=posts
+        if abs(a['foot_px'][0]-b['foot_px'][0])<max(24,2*max(a['rect'][2],b['rect'][2])):continue
+        try:angles=[projector.bearing(p['foot_px'],quaternion) for p in posts]
+        except ValueError:continue
+        separation=abs((angles[0]-angles[1]+np.pi)%(2*np.pi)-np.pi)
+        if .08<=separation<=1.5:result.append({'colour':colour,'bearings':angles})
+    return result
+
+
+def bearing_log_likelihood(particles,observations,goals):
+    """Compare two post directions; do not infer distance from coloured feet."""
+    score=np.zeros(len(particles));used=0
+    for observation in observations:
+        matches=[g for g in goals if g['colour']==observation['colour']]
+        if len(matches)!=1:continue
+        g=matches[0];angles=np.asarray(observation['bearings'],float)
+        if angles.shape!=(2,) or not np.isfinite(angles).all():continue
+        if abs((angles[0]-angles[1]+np.pi)%(2*np.pi)-np.pi)<.08:continue
+        endpoints=np.array([[g['x'],g['y']-g['width']/2],[g['x'],g['y']+g['width']/2]])
+        delta=endpoints[None,:,:]-particles[:,None,:2]
+        predicted=np.arctan2(delta[:,:,1],delta[:,:,0])-particles[:,2,None]
+        errors=[]
+        for target in (angles,angles[::-1]):
+            residual=(predicted-target+np.pi)%(2*np.pi)-np.pi
+            errors.append(np.mean(residual**2,axis=1))
+        best=np.minimum(*errors)
+        # Allow uncertain width/extrinsics; contradictory pairs retain outliers.
+        score+=np.log(.005+.995*np.exp(-.5*best/.15**2))
+        used+=1
+    return score,used

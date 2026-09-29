@@ -92,7 +92,7 @@ class Localisation:
             from .dataplane import Channel,FRAME_TOPIC,IMU_TOPIC,FRAME_HEADER,IMU_RECORD
             from .synchronization import SequenceJoiner
             from .field_observations import runtime_paint_mask,detect_circle,observations
-            from .goal_observations import goal_candidates
+            from .goal_observations import goal_candidates,paired_bearings
             cv2.setNumThreads(1)
             channels=[Channel(FRAME_TOPIC),Channel(IMU_TOPIC)]
             iox=channels[0].iox
@@ -139,6 +139,7 @@ class Localisation:
                     self.dropped+=1;continue
                 started=now
                 image=np.frombuffer(data,np.uint8).reshape(650,800,3)
+                posts=[]
                 try:
                     parameters=self.parameters;revision=self.parameter_revision
                     white=runtime_paint_mask(image,parameters)
@@ -148,7 +149,9 @@ class Localisation:
                         x,y,r=circle['pixel_circle'];yy,xx=np.indices(paint.shape)
                         paint[np.abs(np.hypot(xx-x,yy-y)-r)<8]=0
                     lines=observations(paint,scale=.5)[:32]
-                    result=engine.update(header[0],lines,circle)
+                    posts=goal_candidates(image,parameters)
+                    bearings=paired_bearings(posts,projector,imu[2:6])
+                    result=engine.update(header[0],lines,circle,bearings,timestamp=header[1]/1e9)
                 except ValueError as exc:
                     result={'valid':False,'candidate':None,'reason':str(exc)[:120],
                             'frame_sequence':header[0]}
@@ -156,7 +159,7 @@ class Localisation:
                 result.pop('proposal_spread',None)
                 result.update(sensor_timestamp_ns=header[1],imu_sequence=imu[0],
                               processing_ms=round((time.monotonic()-started)*1000))
-                result['goal_candidates']=goal_candidates(image,parameters)
+                result['goal_candidates']=posts
                 result['parameter_revision']=revision
                 result['processing_ms']=round((time.monotonic()-started)*1000)
                 # Stop invalidates calculations already in flight.

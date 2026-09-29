@@ -26,6 +26,8 @@ SCHEMA = {
     'camera.ae_enabled': ('bool',False,None,None,'next_request','Automatic exposure; manual values retained when enabled'),
     'camera.awb_enabled': ('bool',False,None,None,'next_request','Automatic white balance; manual values retained when enabled'),
     'localisation.camera_height_m': ('float',.4068,.2,.8,'next_localisation','Optical centre height; nominal default, measure for robot posture'),
+    'localisation.max_speed_m_s': ('float',.5,.01,2.,'next_localisation','Maximum plausible translation speed; metres per second'),
+    'localisation.max_turn_rad_s': ('float',2.,.05,6.3,'next_localisation','Maximum plausible yaw speed; radians per second'),
     'vision.field_auto': ('bool',True,None,None,'next_frame','Adaptive paint segmentation; false uses saved LAB thresholds'),
     'vision.field_auto_contrast': ('int',15,0,100,'next_frame','Minimum adaptive white/turf L contrast in OpenCV 0..255 units'),
     **{key: ('object', value, None, None, 'next_localisation', 'Field geometry; metres/radians')

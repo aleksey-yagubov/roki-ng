@@ -52,3 +52,21 @@ class GroundProjection:
         good&=(mx>=0)&(mx<799)&(my>=0)&(my<649)
         mx[~good]=-100;my[~good]=-100
         return cv2.remap(image,mx,my,cv2.INTER_LINEAR)
+
+    def bearing(self, pixel, quaternion):
+        """Horizontal head-reference bearing, without assuming a ground contact."""
+        px,py=map(float,pixel)
+        if not (0<=px<800 and 0<=py<650):raise ValueError('Pixel outside capture')
+        distance=(self.mx[::4,::4]-2*px)**2+(self.my[::4,::4]-2*py)**2
+        row,col=np.unravel_index(np.argmin(distance),distance.shape)
+        y0,x0=max(0,row*4-5),max(0,col*4-5)
+        local=(self.mx[y0:row*4+6,x0:col*4+6]-2*px)**2+(self.my[y0:row*4+6,x0:col*4+6]-2*py)**2
+        dy,dx=np.unravel_index(np.argmin(local),local.shape)
+        if local[dy,dx]>36:raise ValueError('Pixel outside calibrated view')
+        u,v=x0+dx,y0+dy
+        ray=np.array([1.,(self.P[0,2]-u)/self.P[0,0],(self.P[1,2]-v)/self.P[1,1]])
+        pitch,roll=head_angles(quaternion)
+        cr,sr,cp,sp=math.cos(roll),math.sin(roll),math.cos(pitch),math.sin(pitch)
+        rotation=np.array([[cp,0,sp],[sr*sp,cr,-sr*cp],[-cr*sp,sr,cr*cp]])
+        ray=rotation@ray
+        return math.atan2(ray[1],ray[0])

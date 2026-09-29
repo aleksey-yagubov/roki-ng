@@ -339,3 +339,39 @@ def test_ground_projection_matches_legacy_matrix_rays(monkeypatch):
     visible=(u>=0)&(u<1599)&(v>=0)&(v<1299)&(ray[...,0]>.01)
     assert np.allclose(recorded[0][0][visible],u[visible],atol=.001)
     assert np.allclose(recorded[0][1][visible],v[visible],atol=.001)
+
+
+def test_coloured_goal_pair_breaks_symmetry_but_rejects_teleport():
+    from roki_ng.localisation import PoseFilter
+    from roki_ng.field_observations import field_model
+    from roki_ng.parameters import SCHEMA
+    p={k:v[1] for k,v in SCHEMA.items()}
+    pose=np.array([-1.2,-.8,.2]);c,s=np.cos(pose[2]),np.sin(pose[2]);rot=np.array([[c,-s],[s,c]])
+    lines=(field_model()-pose[:2])@rot;circle={'center_robot_m':(-pose[:2]@rot).tolist()}
+    g=p['field.goal.1'];ends=np.array([[g['x'],g['y']-.5],[g['x'],g['y']+.5]])-pose[:2]
+    angles=(np.arctan2(ends[:,1],ends[:,0])-pose[2]).tolist()
+    pf=PoseFilter([0,0,0],parameters=p)
+    result=pf.update(1,lines,circle,[{'colour':'blue','bearings':angles}],timestamp=10.)
+    assert result['fit_state']=='matched'
+    assert np.linalg.norm(np.asarray(result['candidate'])[:2]-pose[:2])<.15
+    assert result['goal_pairs']==1 and not result['valid']
+    before=pf.particles.copy();anchor=pf.anchor.copy()
+    result=pf.update(2,lines,circle,[{'colour':'yellow','bearings':angles}],timestamp=10.1)
+    assert result['reason']=='motion_discontinuity'
+    assert result['candidate'] is None
+    assert np.array_equal(pf.particles,before) and np.array_equal(pf.anchor,anchor)
+    later=pf.update(3,lines,circle,[{'colour':'yellow','bearings':angles}],timestamp=20.)
+    assert later['fit_state']=='matched'  # Enough elapsed time for traversal.
+    assert later['candidate'] is not None
+
+
+def test_goal_pair_rejects_single_fragment_and_duplicate_colours():
+    from roki_ng.goal_observations import paired_bearings,bearing_log_likelihood
+    class Projector:
+        def bearing(self,p,q):return p[0]/500
+    one={'colour':'blue','rect':[20,20,10,50],'foot_px':[25,70]}
+    assert paired_bearings([one],Projector(),[])==[]
+    assert paired_bearings([one,one|{'foot_px':[30,70]}],Projector(),[])==[]
+    goals=[{'colour':'blue','x':-1,'y':0,'width':1},{'colour':'blue','x':1,'y':0,'width':1}]
+    score,used=bearing_log_likelihood(np.array([[0,0,0.]]),[{'colour':'blue','bearings':[-.2,.2]}],goals)
+    assert used==0 and score[0]==0

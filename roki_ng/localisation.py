@@ -4,6 +4,7 @@ Runtime outputs remain invalid until camera/body extrinsics and metric accuracy
 have independent validation. Unique sequences are required within one capture.
 """
 import math
+import time
 
 import numpy as np
 
@@ -27,14 +28,22 @@ class PoseFilter:
         self.particles[:, 2] = (self.particles[:, 2]+np.pi) % (2*np.pi)-np.pi
         self.weights = np.full(count, 1/count)
         self.sequence = -1
+        self.anchor = None
+        self.anchor_time = None
+        self.max_speed = (parameters or {}).get('localisation.max_speed_m_s', .5)
+        self.max_turn = (parameters or {}).get('localisation.max_turn_rad_s', 2.)
         from .field_config import line_model, circle_model
         self.model = line_model(parameters) if parameters else field_model()
         self.circles = circle_model(parameters) if parameters else None
+        self.goals = [parameters[f'field.goal.{i}'] for i in range(2)] if parameters else []
         self.own_goal = parameters.get('match.own_goal',0) if parameters else 0
 
-    def update(self, sequence, lines, circle):
+    def update(self, sequence, lines, circle, goals=None, *, timestamp=None):
         if not isinstance(sequence, int) or sequence <= self.sequence:
             raise ValueError('Repeated or out-of-order frame sequence')
+        now = time.monotonic() if timestamp is None else float(timestamp)
+        if not math.isfinite(now) or (self.anchor_time is not None and now < self.anchor_time):
+            raise ValueError('Nonmonotonic observation time')
         self.sequence = sequence
         if len(lines) < 3:
             return {'valid': False, 'candidate': None, 'reason': 'insufficient_observations',
@@ -62,12 +71,17 @@ class PoseFilter:
             recovery[:, 2] = (recovery[:, 2]+math.pi)%(2*math.pi)-math.pi
             candidates = np.concatenate((self.particles[:len(self.particles)-n], recovery))
         weights, errors = update(candidates, lines, self.model, circle, self.circles)
+        from .goal_observations import bearing_log_likelihood
+        goal_log, goal_pairs = bearing_log_likelihood(candidates, goals or [], self.goals)
+        if goal_pairs:
+            weights *= np.exp(goal_log-goal_log.max())
+            weights /= weights.sum()
         best = int(weights.argmax())
         pose = candidates[best].copy()
         result = {'valid': False, 'candidate': pose.tolist(),
                   'reason': 'unverified_camera_body_calibration',
                   'frame_sequence': sequence, 'lines': len(lines),
-                  'own_goal': self.own_goal,
+                  'own_goal': self.own_goal, 'goal_pairs': goal_pairs,
                   'circle': circle is not None,
                   'median_residual_m': float(np.median(errors[best])),
                   'inlier_fraction': float(np.mean(errors[best] < .10)),
@@ -96,6 +110,14 @@ class PoseFilter:
         # weak view or randomly discarding one of two symmetric modes.
         if result['fit_state'] != 'matched':
             return result
+        if self.anchor is not None:
+            elapsed = now-self.anchor_time
+            translation = float(np.linalg.norm(pose[:2]-self.anchor[:2]))
+            turn = abs((pose[2]-self.anchor[2]+math.pi)%(2*math.pi)-math.pi)
+            if translation > .15+self.max_speed*elapsed or turn > .15+self.max_turn*elapsed:
+                result.update(candidate=None, fit_state='rejected', reason='motion_discontinuity')
+                return result
+        self.anchor, self.anchor_time = pose.copy(), now
         self.weights = weights
         # Systematic proposal resampling with a broad recovery component.
         n = len(weights)
