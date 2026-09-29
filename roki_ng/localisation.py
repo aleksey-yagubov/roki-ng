@@ -72,6 +72,10 @@ class PoseFilter:
         if result['ambiguous']:result['fit_state']='ambiguous'
         # Proposal spread is not a calibrated physical error bar.
         result['proposal_spread']=np.sqrt(np.sum(weights[:,None]*delta**2,axis=0)).tolist()
+        # Do not turn missing information into confidence by resampling a
+        # weak view or randomly discarding one of two symmetric modes.
+        if result['fit_state'] != 'matched':
+            return result
         self.weights = weights
         # Systematic proposal resampling with a broad recovery component.
         n = len(weights)

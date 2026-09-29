@@ -263,3 +263,39 @@ def test_halfway_association_uses_configured_map_size():
     b,_=likelihood(particles,lines,model,circle,None)
     assert np.allclose(a,b)
     assert a[0]>a[1]
+
+
+def test_weak_geometry_does_not_move_particle_proposals():
+    from roki_ng.localisation import PoseFilter
+    pf=PoseFilter([0,0,0],count=512)
+    # Three parallel fragments leave position along the lines unconstrained.
+    lines=np.array([[[-1.,y],[1.,y]] for y in (-1.175,0.,1.175)])
+    before=pf.particles.copy()
+    for sequence in range(1,6):
+        result=pf.update(sequence,lines,None)
+        assert result['fit_state']!='matched'
+    assert np.array_equal(pf.particles,before)
+
+
+def test_ambiguous_mirrored_field_does_not_collapse_to_one_side():
+    from roki_ng.localisation import PoseFilter
+    from roki_ng.field_observations import field_model
+    pf=PoseFilter([0,0,0],count=512)
+    pf.particles[:256]=[0,0,0]
+    pf.particles[256:]=[0,0,np.pi]
+    before=pf.particles.copy()
+    for sequence in range(1,6):
+        assert pf.update(sequence,field_model(),None)['fit_state']=='ambiguous'
+    assert np.array_equal(pf.particles,before)
+
+
+def test_consistent_unambiguous_geometry_can_update_proposals():
+    from roki_ng.localisation import PoseFilter
+    from roki_ng.field_observations import field_model
+    pf=PoseFilter([0,0,0],count=512)
+    pf.particles[:]=0
+    before=pf.particles.copy()
+    result=pf.update(1,field_model(),None)
+    assert result['fit_state']=='matched'
+    assert not np.array_equal(pf.particles,before)
+    assert result['valid'] is False
