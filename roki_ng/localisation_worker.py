@@ -23,6 +23,8 @@ class Localisation:
         from .parameters import SCHEMA
         self.parameters={k:v[1] for k,v in SCHEMA.items()} | config.get('parameters',{})
         self.parameter_revision=0
+        self.configuration_id=None
+        self.geometry=None
 
     def state(self):
         result=dict(self.result) if self.result else None
@@ -33,7 +35,8 @@ class Localisation:
                 'running':self.thread is not None and self.thread.is_alive(),
                 'mode':'diagnostic_only', 'capture_id':self.capture_id,
                 'frames':self.frames,'dropped':self.dropped,'age_ms':age,
-                'error':self.error,'result':result}
+                'error':self.error,'result':result,
+                'configuration_id':self.configuration_id,'geometry':self.geometry}
 
     def command(self, op, args):
         if op=='params.apply':
@@ -61,6 +64,8 @@ class Localisation:
             if profile.get('capture_size')!=[800,650]:
                 raise ValueError('Incompatible capture mode')
             self.parameters=self.parameters | args.get('parameters',{})
+            from .field_config import configuration_id
+            configuration=configuration_id(self.parameters)
             projector=GroundProjection(self.directory,self.parameters['localisation.camera_height_m'])
             engine=PoseFilter(args['prior'],count=2048,parameters=self.parameters)
             offset=args['unicam_minus_stm']
@@ -73,6 +78,8 @@ class Localisation:
         self.result=self.error=None
         self.frames=self.dropped=0
         self.capture_id=args['capture_id']
+        self.configuration_id=configuration
+        self.geometry=dict(self.parameters['field.geometry'])
         self.thread=threading.Thread(target=self._run,args=(engine,projector,offset,self.generation),daemon=True)
         self.thread.start()
         return self.state()
@@ -145,6 +152,8 @@ class Localisation:
                 except ValueError as exc:
                     result={'valid':False,'candidate':None,'reason':str(exc)[:120],
                             'frame_sequence':header[0]}
+                # Keep the bounded UDP state small; proposal spread is offline diagnostics.
+                result.pop('proposal_spread',None)
                 result.update(sensor_timestamp_ns=header[1],imu_sequence=imu[0],
                               processing_ms=round((time.monotonic()-started)*1000))
                 result['goal_candidates']=goal_candidates(image,parameters)
@@ -156,7 +165,9 @@ class Localisation:
                 self.result=result;self.last_measurement=received;self.frames+=1
                 next_compute=time.monotonic()+.2
         except Exception as exc:
-            if not self.stop_event.is_set():self.error=str(exc)[:200]
+            if not self.stop_event.is_set():
+                self.error=str(exc)[:200]
+                self.result=None
         finally:
             guards.clear();waitset=None
             for channel in channels:channel.close()

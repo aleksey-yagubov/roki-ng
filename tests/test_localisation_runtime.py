@@ -175,3 +175,91 @@ def test_goal_colours_preserve_identity_and_reject_background(colour,bgr):
     assert found[0]['colour']==colour
     assert found[0]['foot_px']==[305.,400]
     assert found[0]['metric_valid'] is False
+
+
+def test_parallel_lines_do_not_claim_constrained_geometry():
+    from roki_ng.localisation import PoseFilter
+    lines=np.array([[[-1.,y],[1.,y]] for y in [-1.175,0,1.175]])
+    pf=PoseFilter([0,0,0],count=512)
+    pf.particles[:]=0
+    result=pf.update(1,lines,None)
+    assert result['fit_state']!='matched'
+    assert result['valid'] is False
+
+
+def test_configuration_id_changes_only_for_metric_configuration():
+    from roki_ng.field_config import configuration_id,DEFAULTS
+    p=DEFAULTS|{'match.own_goal':0,'localisation.camera_height_m':.4068}
+    assert configuration_id(p)==configuration_id(p|{'vision.field_auto':False})
+    assert configuration_id(p)!=configuration_id(p|{'localisation.camera_height_m':.5})
+    assert configuration_id(p)!=configuration_id(p|{'match.own_goal':1})
+
+
+def test_proposal_ambiguity_does_not_become_physical_accuracy():
+    from roki_ng.localisation import PoseFilter
+    from roki_ng.field_observations import field_model
+    pf=PoseFilter([0,0,0],count=512)
+    pf.particles[:256]=[0,0,0]
+    pf.particles[256:]=[0,0,np.pi]
+    result=pf.update(1,field_model(),None)
+    assert result['ambiguous']
+    assert result['fit_state']=='ambiguous'
+    assert result['valid'] is False
+
+
+def test_segmentation_keeps_original_pixel_edges():
+    import cv2
+    from roki_ng.field_observations import runtime_paint_mask
+    image=np.full((650,800,3),(40,140,45),np.uint8)
+    cv2.rectangle(image,(80,80),(720,590),(240,240,240),7)
+    cv2.line(image,(111,101),(651,551),(240,240,240),3)
+    mask=runtime_paint_mask(image)
+    # Half-size binary upscaling would make every 2x2 block constant.
+    assert np.any(mask[0::2,0::2]!=mask[0::2,1::2])
+    assert np.any(mask[0::2,0::2]!=mask[1::2,0::2])
+    assert mask[326,381] and not mask[250,500]
+
+
+def test_bounded_status_with_four_goals_fits_udp():
+    import time
+    from roki_ng.localisation_worker import Localisation
+    from roki_ng.localisation import PoseFilter
+    from roki_ng.field_observations import field_model
+    from roki_ng.field_config import GEOMETRY
+    from roki_ng.wire import envelope,pack
+    worker=Localisation({'state_dir':'/tmp'},lambda *a:None,lambda *a:None)
+    result=PoseFilter([0,0,0]).update(1,field_model(),None)
+    result.pop('proposal_spread',None)
+    result.update(sensor_timestamp_ns=2**60,frame_sequence=2**32-1,imu_sequence=2**32-1,
+                  processing_ms=99999,parameter_revision=99999,
+                  goal_candidates=[{'colour':'yellow','rect':[700,500,100,150],
+                                    'foot_px':[799.,649.],'metric_valid':False}]*4)
+    worker.result=result;worker.last_measurement=time.monotonic()
+    worker.geometry=GEOMETRY;worker.configuration_id='f'*16;worker.capture_id='f'*32
+    worker.frames=worker.dropped=2**32-1
+    data={'topic':'localisation.state','valid':False,'source_mono_ns':2**60,
+          'age_ms':99999,'data':worker.state()}
+    packet=pack(envelope('sample','data.sample',data,session=2**63,token=2**63,sequence=2**32-1))
+    assert len(packet)<=1200
+
+
+def test_circle_refinement_rejects_filled_disc():
+    import cv2
+    from roki_ng.field_observations import detect_circle
+    mask=np.zeros((720,720),np.uint8)
+    cv2.circle(mask,(350,400),48,255,-1)
+    assert detect_circle(mask,.5) is None
+
+
+def test_halfway_association_uses_configured_map_size():
+    from roki_ng.field_observations import likelihood
+    from roki_ng.field_config import DEFAULTS,line_model,circle_model
+    params=DEFAULTS|{'field.geometry':DEFAULTS['field.geometry']|{'length':6.,'width':4.}}
+    model=line_model(params)
+    circle={'center_robot_m':[0.,0.]}
+    lines=np.array([[[0.,-1.9],[0.,1.9]]])
+    particles=np.array([[0,0,0],[3.,0,0]])
+    a,_=likelihood(particles,lines,model,circle,circle_model(params))
+    b,_=likelihood(particles,lines,model,circle,None)
+    assert np.allclose(a,b)
+    assert a[0]>a[1]

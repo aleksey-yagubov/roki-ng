@@ -16,10 +16,16 @@ def runtime_paint_mask(image, parameters=None):
         if not contours:raise ValueError('No turf in configured LAB range')
         roi=np.zeros(green.shape,np.uint8)
         cv2.fillConvexPoly(roi,cv2.convexHull(max(contours,key=cv2.contourArea)),255)
-        white=mask(lab,parameters,'white_marking') & roi
+        full_lab=cv2.cvtColor(image,cv2.COLOR_BGR2LAB)
+        white=mask(full_lab,parameters,'white_marking')
     else:
-        _, _, white, _ = segment(reduced,parameters)
-    return cv2.resize(white, (800, 650), interpolation=cv2.INTER_NEAREST)
+        _, roi, _, metadata = segment(reduced,parameters)
+        # Estimate colours cheaply, but classify the original pixels. Upscaling
+        # a binary half-size mask introduces stair steps amplified by projection.
+        full_lab=cv2.cvtColor(image,cv2.COLOR_BGR2LAB).astype(np.float32)
+        centres=np.asarray(metadata['roi_lab_centres'],np.float32)
+        white=(classify(full_lab,centres)==metadata['white_cluster']).astype(np.uint8)*255
+    return white & cv2.resize(roi,(800,650),interpolation=cv2.INTER_NEAREST)
 
 def clusters(values, count):
     cv2.setRNGSeed(17)
@@ -126,15 +132,34 @@ def detect_circle(mask, scale=1.):
         return None
     angles = np.linspace(0, 2*np.pi, 120, endpoint=False)
     scored = []
-    for x, y, radius in candidates.reshape(-1,3)/scale:
-        coverage = np.zeros(len(angles), bool)
-        for dr in (-3, -1, 0, 1, 3):
-            xx = np.rint(x+(radius+dr)*np.cos(angles)).astype(int)
-            yy = np.rint(y+(radius+dr)*np.sin(angles)).astype(int)
-            inside = (xx>=0)&(yy>=0)&(xx<mask.shape[1])&(yy<mask.shape[0])
-            coverage[inside] |= mask[yy[inside], xx[inside]]>128
-        if coverage.mean() >= .85:
-            scored.append((float(coverage.mean()), float(x), float(y), float(radius)))
+    # Refine coarse Hough proposals locally against the original paint pixels.
+    # This avoids version/scale rounding deciding whether a real ring is lost.
+    from itertools import product
+    offsets=np.array(list(product((-2.,0.,2.),(-2.,0.,2.),(-3.,0.,3.))))
+    for proposal in candidates.reshape(-1,3)/scale:
+        variants=proposal+offsets
+        coverage=np.zeros((len(variants),len(angles)),bool)
+        for dr in (-3,-1,0,1,3):
+            sx=np.rint(variants[:,0,None]+(variants[:,2,None]+dr)*np.cos(angles)).astype(int)
+            sy=np.rint(variants[:,1,None]+(variants[:,2,None]+dr)*np.sin(angles)).astype(int)
+            inside=(sx>=0)&(sy>=0)&(sx<mask.shape[1])&(sy<mask.shape[0])
+            coverage[inside]|=mask[sy[inside],sx[inside]]>128
+        scores=coverage.mean(axis=1)
+        # Break ties toward the Hough proposal instead of an arbitrary shift.
+        order=np.lexsort((np.sum(offsets**2,axis=1),-scores))
+        for idx in order:
+            if scores[idx]<.85:break
+            x,y,radius=variants[idx]
+            # A filled white background patch is not a painted ring.
+            inner=[]
+            for fraction in (.25,.5,.7):
+                sx=np.rint(x+radius*fraction*np.cos(angles)).astype(int)
+                sy=np.rint(y+radius*fraction*np.sin(angles)).astype(int)
+                inside=(sx>=0)&(sy>=0)&(sx<mask.shape[1])&(sy<mask.shape[0])
+                inner.extend((mask[sy[inside],sx[inside]]>128).tolist())
+            if not inner or np.mean(inner)>.35:continue
+            scored.append((float(scores[idx]),float(x),float(y),float(radius)))
+            break
     if not scored:
         return None
     scored.sort(reverse=True)
@@ -171,14 +196,16 @@ def likelihood(particles, lines, model, circle=None, circles=None):
         best = np.full(len(particles), np.inf)
         best_distance = best.copy()
         associated_model = model
-        if circle is not None and circles is None:
+        central_only=circles is None or (len(circles)==1 and np.allclose(circles[0]['center'],[0.,0.]))
+        if circle is not None and central_only:
             center = np.asarray(circle['center_robot_m'])
             direction = line[1]-line[0]
             normal = np.array([-direction[1], direction[0]])/np.linalg.norm(direction)
             # A long straight passing through the detected circle's centre is
             # the halfway line, not an arbitrary parallel boundary.
             if abs((center-line[0])@normal)<.10 and np.linalg.norm(direction)>.8:
-                associated_model = np.array([[[0, -1.175], [0, 1.175]]])
+                halfway=model[np.all(np.isclose(model[:,:,0],0),axis=1)]
+                if len(halfway):associated_model=halfway
         for a, b in associated_model:
             v = b-a
             t = np.clip(((q-a)*v).sum(axis=-1)/(v@v), 0, 1)

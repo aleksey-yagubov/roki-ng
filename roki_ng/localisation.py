@@ -15,7 +15,7 @@ class PoseFilter:
         prior = np.asarray(prior, dtype=float)
         if prior.shape != (3,) or not np.isfinite(prior).all():
             raise ValueError('Invalid pose prior')
-        if not isinstance(count, int) or not 256 <= count <= 8192:
+        if type(count) is not int or not 256 <= count <= 8192:
             raise ValueError('Particle count must be 256..8192')
         geometry=parameters.get('field.geometry') if parameters else None
         bounds=(geometry['carpet_length']/2+1,geometry['carpet_width']/2+1) if geometry else (3,3)
@@ -24,6 +24,7 @@ class PoseFilter:
         self.rng = np.random.default_rng(seed)
         self.prior = prior.copy()
         self.particles = self.rng.normal(prior, [.55, .55, .44], (count, 3))
+        self.particles[:, 2] = (self.particles[:, 2]+np.pi) % (2*np.pi)-np.pi
         self.weights = np.full(count, 1/count)
         self.sequence = -1
         from .field_config import line_model, circle_model
@@ -53,6 +54,24 @@ class PoseFilter:
                   'ess': float(1/(weights@weights))}
         if result['inlier_fraction'] < .6 or result['median_residual_m'] > .10:
             result['reason'] = 'unverified_camera_body_calibration; weak_geometry'
+        segments=np.asarray(lines,dtype=float)
+        vectors=segments[:,1]-segments[:,0]
+        directions=np.arctan2(vectors[:,1],vectors[:,0])
+        supported=errors[best]<.10
+        angles=directions[supported]
+        independent=bool(len(angles)>1 and np.max(np.abs(np.sin(angles[:,None]-angles)))>.5)
+        # A parallel edge family cannot constrain translation along the lines.
+        strong=result['inlier_fraction']>=.6 and result['median_residual_m']<=.10
+        result['fit_state']='matched' if strong and (independent or circle is not None) else 'weak'
+        delta=self.particles-pose
+        delta[:,2]=(delta[:,2]+np.pi)%(2*np.pi)-np.pi
+        local=(np.linalg.norm(delta[:,:2],axis=1)<.35)&(np.abs(delta[:,2])<.35)
+        mass=float(weights[local].sum())
+        result['mode_mass']=mass
+        result['ambiguous']=mass<.6
+        if result['ambiguous']:result['fit_state']='ambiguous'
+        # Proposal spread is not a calibrated physical error bar.
+        result['proposal_spread']=np.sqrt(np.sum(weights[:,None]*delta**2,axis=0)).tolist()
         self.weights = weights
         # Systematic proposal resampling with a broad recovery component.
         n = len(weights)

@@ -72,3 +72,13 @@ def circle_model(parameters):
         if key.startswith('field.mark.') and m['enabled'] and m['kind']=='ring':
             circles.append({'center':[m['x'],m['y']],'radius':m['size']/2})
     return circles
+
+
+def configuration_id(parameters):
+    """Identity of the saved metric map/extrinsics used for one capture."""
+    import hashlib
+    import json
+    selected={key:value for key,value in parameters.items()
+              if key.startswith('field.') or key in ('match.own_goal','localisation.camera_height_m')}
+    return hashlib.sha256(json.dumps(selected,sort_keys=True,separators=(',',':'),
+                                    allow_nan=False).encode()).hexdigest()[:16]
