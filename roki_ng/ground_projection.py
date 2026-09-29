@@ -28,7 +28,7 @@ class GroundProjection:
         if m1.shape!=(1300,1600,2) or m1.dtype!=np.int16 or m2.shape!=(1300,1600) or m2.dtype!=np.uint16:
             raise ValueError('Incompatible legacy remap tables')
         self.mx,self.my = cv2.convertMaps(m1,m2,cv2.CV_32FC1)
-        row,col=np.indices((720,720),dtype=float)
+        row,col=np.indices((720,720),dtype=np.float32)
         self.ground=np.stack((4-(row+.5)/180,2-(col+.5)/180,np.full_like(row,-height)),axis=-1)
 
     def project(self, image, quaternion):
@@ -36,12 +36,16 @@ class GroundProjection:
             raise ValueError('Expected 800x650 capture; calibration is mode-specific')
         pitch,roll=head_angles(quaternion)
         cr,sr,cp,sp=math.cos(roll),math.sin(roll),math.cos(pitch),math.sin(pitch)
-        rotation=np.array([[cp,0,sp],[sr*sp,cr,-sr*cp],[-cr*sp,sr,cr*cp]])
-        ray=self.ground@rotation
-        front=ray[...,0]>.01
-        denom=np.where(front,ray[...,0],1.)
-        u=(self.P[0,2]-self.P[0,0]*ray[...,1]/denom).astype(np.float32)
-        v=(self.P[1,2]-self.P[1,1]*ray[...,2]/denom).astype(np.float32)
+        x,y,z=np.moveaxis(self.ground,-1,0)
+        # Evaluate only the three required ray components; avoid allocating a
+        # float64 HxWx3 matrix product on every camera frame.
+        forward=cp*x+sr*sp*y-cr*sp*z
+        left=cr*y+sr*z
+        up=sp*x-sr*cp*y+cr*cp*z
+        front=forward>.01
+        denom=np.where(front,forward,1.)
+        u=(self.P[0,2]-self.P[0,0]*left/denom).astype(np.float32)
+        v=(self.P[1,2]-self.P[1,1]*up/denom).astype(np.float32)
         good=front&(u>=0)&(u<1599)&(v>=0)&(v<1299)
         mx=cv2.remap(self.mx,u,v,cv2.INTER_LINEAR,borderValue=-100)*.5
         my=cv2.remap(self.my,u,v,cv2.INTER_LINEAR,borderValue=-100)*.5

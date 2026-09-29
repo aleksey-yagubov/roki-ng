@@ -41,9 +41,29 @@ class PoseFilter:
                     'frame_sequence': sequence, 'lines': len(lines)}
         # Per-frame measurement weights, not posterior multiplication of
         # correlated stationary views. Resampling guides the next proposal only.
-        weights, errors = update(self.particles, lines, self.model, circle, self.circles)
+        candidates = self.particles
+        # A wrong translation prior must not prevent a visible circle from
+        # proposing poses. Keep all four field-axis orientations: a symmetric
+        # field cannot establish the side from white paint alone.
+        if circle is not None and (self.circles is None or len(self.circles) == 1):
+            centre = np.asarray(circle['center_robot_m'], dtype=float)
+            landmark = np.zeros(2) if self.circles is None else np.asarray(self.circles[0]['center'])
+            segments = np.asarray(lines)
+            vectors = segments[:, 1] - segments[:, 0]
+            direction = vectors[np.argmax(np.linalg.norm(vectors, axis=1))]
+            base = -math.atan2(direction[1], direction[0])
+            n = len(self.particles)//2
+            yaw = base + (np.arange(n)%4)*math.pi/2
+            recovery = np.column_stack((landmark[0]-np.cos(yaw)*centre[0]+np.sin(yaw)*centre[1],
+                                        landmark[1]-np.sin(yaw)*centre[0]-np.cos(yaw)*centre[1], yaw))
+            # Use a frame-independent cloud; repeated static observations must
+            # not randomly remove one of the symmetric hypotheses.
+            recovery += np.random.default_rng(41).normal(0, [.08, .08, .05], recovery.shape)
+            recovery[:, 2] = (recovery[:, 2]+math.pi)%(2*math.pi)-math.pi
+            candidates = np.concatenate((self.particles[:len(self.particles)-n], recovery))
+        weights, errors = update(candidates, lines, self.model, circle, self.circles)
         best = int(weights.argmax())
-        pose = self.particles[best].copy()
+        pose = candidates[best].copy()
         result = {'valid': False, 'candidate': pose.tolist(),
                   'reason': 'unverified_camera_body_calibration',
                   'frame_sequence': sequence, 'lines': len(lines),
@@ -63,7 +83,7 @@ class PoseFilter:
         # A parallel edge family cannot constrain translation along the lines.
         strong=result['inlier_fraction']>=.6 and result['median_residual_m']<=.10
         result['fit_state']='matched' if strong and (independent or circle is not None) else 'weak'
-        delta=self.particles-pose
+        delta=candidates-pose
         delta[:,2]=(delta[:,2]+np.pi)%(2*np.pi)-np.pi
         local=(np.linalg.norm(delta[:,:2],axis=1)<.35)&(np.abs(delta[:,2])<.35)
         mass=float(weights[local].sum())
@@ -81,7 +101,7 @@ class PoseFilter:
         n = len(weights)
         indexes = np.searchsorted(np.cumsum(weights), (self.rng.random()+np.arange(n))/n)
         indexes = np.minimum(indexes, n-1)
-        proposal = self.particles[indexes]+self.rng.normal(0, [.05, .05, .04], (n, 3))
+        proposal = candidates[indexes]+self.rng.normal(0, [.05, .05, .04], (n, 3))
         recover = n//5
         proposal[:recover] = self.rng.normal(self.prior, [.65, .65, .5], (recover, 3))
         proposal[:, 2] = (proposal[:, 2]+np.pi) % (2*np.pi)-np.pi

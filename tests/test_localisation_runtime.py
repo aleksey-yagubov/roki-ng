@@ -299,3 +299,43 @@ def test_consistent_unambiguous_geometry_can_update_proposals():
     assert result['fit_state']=='matched'
     assert not np.array_equal(pf.particles,before)
     assert result['valid'] is False
+
+
+def test_circle_recovers_translation_without_claiming_unique_field_side():
+    from roki_ng.localisation import PoseFilter
+    from roki_ng.field_observations import field_model
+    pose=np.array([-1.3,-.95,.2]);c,s=np.cos(pose[2]),np.sin(pose[2])
+    rotation=np.array([[c,-s],[s,c]])
+    lines=(field_model()-pose[:2])@rotation
+    circle={'center_robot_m':(-pose[:2]@rotation).tolist()}
+    pf=PoseFilter([0,0,0], count=2048)
+    before=pf.particles.copy()
+    result=pf.update(1,lines,circle)
+    assert result['inlier_fraction'] >= .8
+    assert result['median_residual_m'] < .08
+    assert result['ambiguous'] and not result['valid']
+    assert np.array_equal(before,pf.particles)
+
+
+def test_ground_projection_matches_legacy_matrix_rays(monkeypatch):
+    import cv2,math
+    from roki_ng.ground_projection import GroundProjection,head_angles
+    g=GroundProjection.__new__(GroundProjection)
+    g.P=np.array([[500.,0,800],[0,500.,650],[0,0,1]])
+    row,col=np.indices((720,720),dtype=np.float32)
+    g.ground=np.stack((4-(row+.5)/180,2-(col+.5)/180,np.full_like(row,-.4068)),axis=-1)
+    g.mx=g.my=np.zeros((1300,1600),np.float32)
+    recorded=[]
+    def remap(source,u,v,*args,**kwargs):
+        recorded.append((u.copy(),v.copy()))
+        return np.zeros(u.shape,np.float32)
+    monkeypatch.setattr(cv2,'remap',remap)
+    q=[.89,-.07,-.03,.45]
+    g.project(np.zeros((650,800),np.uint8),q)
+    pitch,roll=head_angles(q);cr,sr,cp,sp=math.cos(roll),math.sin(roll),math.cos(pitch),math.sin(pitch)
+    rotation=np.array([[cp,0,sp],[sr*sp,cr,-sr*cp],[-cr*sp,sr,cr*cp]])
+    ray=g.ground.astype(float)@rotation;denom=np.where(ray[...,0]>.01,ray[...,0],1.)
+    u=800-500*ray[...,1]/denom;v=650-500*ray[...,2]/denom
+    visible=(u>=0)&(u<1599)&(v>=0)&(v<1299)&(ray[...,0]>.01)
+    assert np.allclose(recorded[0][0][visible],u[visible],atol=.001)
+    assert np.allclose(recorded[0][1][visible],v[visible],atol=.001)
