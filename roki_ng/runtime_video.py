@@ -1,17 +1,17 @@
 """Runtime BGR frames -> appsrc; camera and IMU lifetimes remain independent."""
 
-from .dataplane import FRAME_HEADER
+from .dataplane import FRAME_HEADER,FRAME_TOPIC
 from .frame_reader import FrameReader
 
 
 class RuntimeVideo:
-    def __init__(self, appsrc, gst, fps):
+    def __init__(self, appsrc, gst, fps, topic=FRAME_TOPIC):
         self.appsrc, self.gst = appsrc, gst
         self.period_ns = round(1e9 / fps)
         self.submitted = self.rate_skipped = 0
         self.sequence = None
         self.first_stamp = self.next_stamp = None
-        self.reader = FrameReader(self.push)
+        self.reader = FrameReader(self.push) if topic==FRAME_TOPIC else FrameReader(self.push,topic=topic)
 
     @property
     def error(self):

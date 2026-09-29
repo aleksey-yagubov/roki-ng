@@ -414,7 +414,7 @@ class Supervisor:
         if op == "system.capabilities":
             return {"revision": "runtime-1", "modes": ["IDLE", "MANUAL"],
                     "body": ["software_slots", "walk", "jump", "kick", "head", "tests"],
-                    "video_backends": ["direct-gst", "runtime"], "data_topics": list(TOPICS),
+                    "video_backends": ["direct-gst", "runtime", "localisation"], "data_topics": list(TOPICS),
                     "capture_backends": ["libcamera-iceoryx2"],
                     "detectors": ["colour_blobs"],
                     "localisation": {"mode": "diagnostic_only", "motion_pose": False},
@@ -561,7 +561,7 @@ class Supervisor:
         if op == "camera.status":
             return await self.workers["camera"].call(op)
         if op == "localisation.status":
-            return await self.workers["localisation"].call(op)
+            return await self.workers["localisation"].call(op, body)
         if op in ("localisation.start", "localisation.stop"):
             async with self.capture_lock:
                 self.require_control(session, body)
@@ -635,9 +635,12 @@ class Supervisor:
                     self.require_control(session, body)
                     camera = await self.workers["camera"].call("camera.status")
                     video = await self.workers["stream"].call("video.status", body)
-                    runtime = video["spec"]["backend"] == "runtime"
+                    runtime = video["spec"]["backend"] in ("runtime", "localisation")
                     if camera["prepared"] and not runtime:
                         raise Fault("busy", "Stop runtime capture before direct-gst")
+                    if video["spec"]["backend"] == "localisation":
+                        state=await self.workers["localisation"].call('localisation.status')
+                        if not state['running']:raise Fault('not_ready','Start localisation before diagnostic video')
                     if runtime:
                         if not camera["running"]:
                             raise Fault("not_ready", "Start runtime camera before video")

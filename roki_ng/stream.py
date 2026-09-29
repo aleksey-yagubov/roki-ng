@@ -10,7 +10,7 @@ from .wire import Fault, choice, number, udp_socket
 
 
 def video_spec(args):
-    backend = choice(args, "backend", "direct-gst", ("direct-gst", "runtime"))
+    backend = choice(args, "backend", "direct-gst", ("direct-gst", "runtime", "localisation"))
     sensor = args.get("sensor", {})
     output = args.get("output", {})
     codec = args.get("codec", {})
@@ -20,7 +20,7 @@ def video_spec(args):
     sw = number(sensor, "width", 1600, 320, 4096, True)
     sh = number(sensor, "height", 1300, 240, 4096, True)
     depth = choice(sensor, "depth", 10, (8, 10))
-    if backend == "runtime" and sensor:
+    if backend in ("runtime", "localisation") and sensor:
         raise Fault("invalid_argument", "Runtime sensor belongs to camera-worker; omit sensor")
     width = number(output, "width", 800, 160, 1600, True)
     height = number(output, "height", 650, 120, 1300, True)
@@ -32,7 +32,7 @@ def video_spec(args):
         raise Fault("invalid_argument", "RTP/JPEG dimensions must be multiples of 8; use e.g. 800x648")
     if name == "jpeg" and "bitrate" in codec:
         raise Fault("not_supported", "JPEG bitrate is not controlled by this backend")
-    if backend == "runtime" and (width > 800 or height > 650):
+    if backend in ("runtime", "localisation") and (width > 800 or height > 650):
         raise Fault("invalid_argument", "Runtime output cannot exceed 800x650")
     return {"backend": backend, "sensor": {"width": sw, "height": sh, "depth": depth},
             "output": {"width": width, "height": height, "fps": fps},
@@ -50,13 +50,13 @@ def pipeline_description(spec, test_source=False):
         f"width={sensor['width']},height={sensor['height']},depth={sensor['depth']}\"")
     caps = f"video/x-raw,format=NV12,width={output['width']},height={output['height']},framerate={fps.numerator}/{fps.denominator}"
     convert = "videoconvert" if test_source else "v4l2convert disable-passthrough=true"
-    if spec["backend"] == "runtime":
+    if spec["backend"] in ("runtime", "localisation"):
         source = "appsrc name=frames is-live=true format=time block=false max-buffers=2 max-bytes=0 leaky-type=downstream"
         caps = ("video/x-raw,format=BGR,width=800,height=650,"
                 f"framerate={fps.numerator}/{fps.denominator}")
         convert = "videoconvert ! videoscale" if test_source else "v4l2convert disable-passthrough=true"
     converted = "video/x-raw,format=I420"
-    if spec["backend"] == "runtime":
+    if spec["backend"] in ("runtime", "localisation"):
         converted += f",width={output['width']},height={output['height']}"
     if codec["name"] == "h264":
         encoder = (f"x264enc name=encoder tune=zerolatency bitrate={codec['bitrate']//1000} key-int-max=30" if test_source else
@@ -106,13 +106,13 @@ class Streams:
         if op == "state":
             return self.state()
         if op in ("camera.capabilities", "video.capabilities"):
-            return {"backends": ["direct-gst", "runtime"], "codecs": ["h264", "jpeg"],
+            return {"backends": ["direct-gst", "runtime", "localisation"], "codecs": ["h264", "jpeg"],
                     "sensor_default": {"width": 1600, "height": 1300, "depth": 10},
                     "output_default": {"width": 800, "height": 650, "fps": 60},
                     "sensor_modes_probed": False, "settings_verified": False,
                     "exact_osd": False, "max_active": 1, "live_update": [], "rtcp": False}
         if op == "video.stop_runtime":
-            if self.active and self.streams[self.active]["spec"]["backend"] == "runtime":
+            if self.active and self.streams[self.active]["spec"]["backend"] in ("runtime", "localisation"):
                 ident = self.active
                 self._stop()
                 self.emit("video.stopped", {"stream_id": ident, "reason": "camera_stopped"})
@@ -141,7 +141,7 @@ class Streams:
                 return info
             if self.active:
                 raise Fault("camera_busy", "Another stream owns the encoder")
-            if info["spec"]["backend"] == "runtime":
+            if info["spec"]["backend"] in ("runtime", "localisation"):
                 duration = number(args, "source_frame_duration_us", None, 8333, 100000, True)
                 if info["spec"]["output"]["fps"] > 1000000 / duration * 1.001:
                     raise Fault("invalid_argument", "Video FPS cannot exceed runtime camera FPS")
@@ -193,10 +193,12 @@ class Streams:
                 self.Gst.PadProbeType.BUFFER | self.Gst.PadProbeType.BUFFER_LIST, self._packet)
             if self.pipeline.set_state(self.Gst.State.PLAYING) == self.Gst.StateChangeReturn.FAILURE:
                 raise Fault("pipeline_error", "GStreamer refused PLAYING")
-            if info["spec"]["backend"] == "runtime":
+            if info["spec"]["backend"] in ("runtime", "localisation"):
                 from .runtime_video import RuntimeVideo
+                from .dataplane import FRAME_TOPIC, LOCALISATION_TOPIC
                 self.runtime = RuntimeVideo(self.pipeline.get_by_name("frames"), self.Gst,
-                                            info["spec"]["output"]["fps"])
+                                            info["spec"]["output"]["fps"],
+                                            topic=LOCALISATION_TOPIC if info["spec"]["backend"]=="localisation" else FRAME_TOPIC)
         except Exception as exc:
             self._fail(str(exc))
             raise Fault("pipeline_error", str(exc)) from exc

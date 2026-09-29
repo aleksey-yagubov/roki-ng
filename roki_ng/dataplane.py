@@ -5,12 +5,13 @@ import struct
 from contextlib import contextmanager
 
 FRAME_TOPIC = "roki/camera/frame/v1"
+LOCALISATION_TOPIC = "roki/localisation/frame/v1"
 IMU_TOPIC = "roki/motherboard/imu/v1"
 DETECTIONS_TOPIC = "roki/detection/blobs/v1"
 FRAME_HEADER = struct.Struct("<IQIII")  # Unicam u32, sensor ns, width, height, stride
 IMU_RECORD = struct.Struct("<IQffffI")  # STM sequence, Bosch sensor ns, quaternion xyzw, sensor ID
 FRAME_BYTES = FRAME_HEADER.size + 800 * 650 * 3
-TOPICS = {FRAME_TOPIC: (4, FRAME_BYTES), IMU_TOPIC: (128, IMU_RECORD.size),
+TOPICS = {FRAME_TOPIC: (4, FRAME_BYTES), LOCALISATION_TOPIC: (4, FRAME_BYTES), IMU_TOPIC: (128, IMU_RECORD.size),
           DETECTIONS_TOPIC: (4, 4096)}
 
 

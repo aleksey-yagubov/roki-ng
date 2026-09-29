@@ -85,15 +85,16 @@ class Localisation:
         return self.state()
 
     def _run(self, engine, projector, offset, generation):
-        channels=[];guards=[];waitset=None
+        channels=[];guards=[];waitset=None;debug_channel=None
         try:
             import cv2
             import numpy as np
-            from .dataplane import Channel,FRAME_TOPIC,IMU_TOPIC,FRAME_HEADER,IMU_RECORD
+            from .dataplane import Channel,FRAME_TOPIC,IMU_TOPIC,FRAME_HEADER,IMU_RECORD,LOCALISATION_TOPIC,FRAME_BYTES
             from .synchronization import SequenceJoiner
             from .field_observations import runtime_paint_mask,detect_circle,observations
             from .goal_observations import goal_candidates,paired_bearings
             cv2.setNumThreads(1)
+            debug_channel=Channel(LOCALISATION_TOPIC,publisher=True)
             channels=[Channel(FRAME_TOPIC),Channel(IMU_TOPIC)]
             iox=channels[0].iox
             waitset=iox.WaitSetBuilder.new().create(iox.ServiceType.Ipc)
@@ -139,7 +140,7 @@ class Localisation:
                     self.dropped+=1;continue
                 started=now
                 image=np.frombuffer(data,np.uint8).reshape(650,800,3)
-                posts=[]
+                posts=[];lines=[];circle=None
                 try:
                     parameters=self.parameters;revision=self.parameter_revision
                     white=runtime_paint_mask(image,parameters)
@@ -165,6 +166,13 @@ class Localisation:
                 # Stop invalidates calculations already in flight.
                 if self.stop_event.is_set() or self.generation!=generation:break
                 if revision!=self.parameter_revision:continue
+                from .localisation_debug import video_frame
+                annotated=video_frame(image,projector,imu[2:6],lines,circle,posts,result,engine.model,engine.circles)
+                if self.stop_event.is_set() or self.generation!=generation:break
+                result['processing_ms']=round((time.monotonic()-started)*1000)
+                with debug_channel.loan(FRAME_BYTES) as target:
+                    FRAME_HEADER.pack_into(target,0,*header)
+                    target[FRAME_HEADER.size:]=annotated.tobytes()
                 self.result=result;self.last_measurement=received;self.frames+=1
                 next_compute=time.monotonic()+.2
         except Exception as exc:
@@ -174,6 +182,7 @@ class Localisation:
         finally:
             guards.clear();waitset=None
             for channel in channels:channel.close()
+            if debug_channel is not None:debug_channel.close()
 
     def tick(self):
         # Worker heartbeat carries bounded state. Avoid per-frame events.

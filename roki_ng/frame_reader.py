@@ -7,8 +7,9 @@ from .dataplane import Channel, FRAME_TOPIC
 
 
 class FrameReader:
-    def __init__(self, consume):
+    def __init__(self, consume, topic=FRAME_TOPIC):
         self.consume = consume
+        self.topic = topic
         self.error = None
         self.skipped = 0
         self.ready = threading.Event()
@@ -23,7 +24,7 @@ class FrameReader:
     def _run(self):
         channel = waitset = guard = stop_guard = stop_fd = None
         try:
-            channel = Channel(FRAME_TOPIC)
+            channel = Channel(self.topic)
             iox = channel.iox
             waitset = iox.WaitSetBuilder.new().create(iox.ServiceType.Ipc)
             guard = waitset.attach_notification(channel.listener)

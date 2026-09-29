@@ -60,7 +60,7 @@ def test_runtime_appsrc_jpeg_decode_and_colour(monkeypatch):
             pytest.skip(f"Missing GStreamer element: {name}")
 
     class InjectedFrames(RuntimeVideo):
-        def __init__(self, appsrc, gst, fps):
+        def __init__(self, appsrc, gst, fps, topic=None):
             from types import SimpleNamespace
             self.appsrc, self.gst = appsrc, gst
             self.period_ns = round(1e9 / fps)

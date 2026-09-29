@@ -70,3 +70,17 @@ class GroundProjection:
         rotation=np.array([[cp,0,sp],[sr*sp,cr,-sr*cp],[-cr*sp,sr,cr*cp]])
         ray=rotation@ray
         return math.atan2(ray[1],ray[0])
+
+    def image_points(self, points, quaternion):
+        """Project floor points back into the original distorted capture."""
+        points=np.asarray(points,float)
+        xyz=np.column_stack((points,np.full(len(points),self.ground[0,0,2])))
+        pitch,roll=head_angles(quaternion);cr,sr,cp,sp=math.cos(roll),math.sin(roll),math.cos(pitch),math.sin(pitch)
+        rotation=np.array([[cp,0,sp],[sr*sp,cr,-sr*cp],[-cr*sp,sr,cr*cp]])
+        ray=xyz@rotation;front=ray[:,0]>.01;denom=np.where(front,ray[:,0],1.)
+        u=((self.P[0,2]-self.P[0,0]*ray[:,1]/denom).astype(np.float32))[:,None]
+        v=((self.P[1,2]-self.P[1,1]*ray[:,2]/denom).astype(np.float32))[:,None]
+        x=cv2.remap(self.mx,u,v,cv2.INTER_LINEAR,borderValue=-100).ravel()*.5
+        y=cv2.remap(self.my,u,v,cv2.INTER_LINEAR,borderValue=-100).ravel()*.5
+        valid=front&(x>=0)&(x<800)&(y>=0)&(y<650)
+        return np.column_stack((x,y)),valid
