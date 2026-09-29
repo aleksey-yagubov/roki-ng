@@ -24,15 +24,18 @@ class Engine(Robot, GaitAlgorithms):
         self.ztr = self.ztl = -self.gaitHeight
 
     def configure(self, values):
-        self.stepHeight = values["motion.step_height_mm"]
-        self.frames_per_cycle = values["motion.frames_per_cycle"]
+        self.gaitHeight = values["walk.gait_height_mm"]
+        self.amplitude = values["walk.sway_amplitude_mm"]
+        self.stepHeight = values["walk.step_height_mm"]
+        self.frames_per_cycle = values["walk.servo_frames_per_pose"]
         self.motion_shift_correction_x = -values["motion.shift_x_mm"] / 21
         self.motion_shift_correction_y = -values["motion.shift_y_mm"] / 21
         self.params = {
-            "BODY_TILT_AT_WALK": values["motion.body_tilt"],
-            "BODY_TILT_AT_WALK_BACKWARDS": values["motion.body_tilt_back"],
-            "BODY_TILT_AT_KICK": values.get("motion.body_tilt_kick", 0),
-            "SOLE_LANDING_SKEW": values["motion.sole_skew"],
+            "BODY_TILT_AT_WALK": values["walk.body_tilt_forward"],
+            "BODY_TILT_AT_WALK_BACKWARDS": values["walk.body_tilt_backward"],
+            "BODY_TILT_AT_KICK": values.get("kick.body_tilt", 0),
+            "SOLE_LANDING_SKEW": values["walk.sole_skew"],
+            "KICK_SOLE_LANDING_SKEW": values["kick.sole_skew"],
             "ROTATION_YIELD_RIGHT": values["motion.rotation_yield_right"],
             "ROTATION_YIELD_LEFT": values["motion.rotation_yield_left"],
         }

@@ -433,7 +433,7 @@ class GaitAlgorithms:
         dx0_typical = self.stepLength / (2 * self.fr1 + self.fr2 + 2 * framestep) * framestep
         xr_old, xl_old, yr_old, yl_old = (self.xr, self.xl, self.yr, self.yl)
         self.xr, self.xl = (self.params['BODY_TILT_AT_KICK'], self.params['BODY_TILT_AT_KICK'])
-        self.yr, self.yl = (-self.params['SOLE_LANDING_SKEW'], self.params['SOLE_LANDING_SKEW'])
+        self.yr, self.yl = (-self.params['KICK_SOLE_LANDING_SKEW'], self.params['KICK_SOLE_LANDING_SKEW'])
         fase_offset = 0.7
         yield ('drain',)
         for iii in range(0, frameNumberPerCycle, framestep):

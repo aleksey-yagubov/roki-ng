@@ -14,12 +14,12 @@ from roki_ng.wire import Fault, envelope, pack
 
 def test_parameters_persist_and_reject_invalid(tmp_path):
     params = Parameters(tmp_path)
-    params.set("motion.max_step_mm", 30)
-    assert Parameters(tmp_path).values["motion.max_step_mm"] == 30
+    params.set("walk.max_step_mm", 30)
+    assert Parameters(tmp_path).values["walk.max_step_mm"] == 30
     for value in (True, float("nan"), -1, "24"):
         with pytest.raises(Fault):
-            params.set("motion.max_step_mm", value)
-    assert json.loads(params.path.read_text())["motion.max_step_mm"] == 30
+            params.set("walk.max_step_mm", value)
+    assert json.loads(params.path.read_text())["walk.max_step_mm"] == 30
 
 
 def test_body_busy_cancel_and_recovery(tmp_path):

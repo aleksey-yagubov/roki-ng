@@ -160,6 +160,7 @@ class Body:
         self.recovery_active = False
         self.model = Robot()
         self.engine = None
+        self.servo_targets = {}
         self.pose = "unknown"
         self.control = False
         self.error = None
@@ -277,9 +278,15 @@ class Body:
         if op == "params.apply":
             if self.active:
                 raise Fault("busy", "Stop motion before applying motion parameters", True)
+            geometry_changed = any(key in args and args[key] != self.parameters[key]
+                                   for key in ("walk.gait_height_mm", "walk.sway_amplitude_mm"))
             self.parameters.update(args)
             if self.engine:
                 self.engine.configure(self.parameters)
+            if geometry_changed:
+                self.engine = None
+                if self.pose == "crouch":
+                    self.pose = "unknown"
             return {}
         if op == "motion.slots":
             return page(self.slots, args)
@@ -293,6 +300,7 @@ class Body:
             self.plan = self.instruction = None
             self.pose = "unknown"
             self.engine = None
+            self.servo_targets.clear()
             try:
                 self.hardware.reset()
             except Exception as exc:
@@ -366,6 +374,9 @@ class Body:
         if op == "motion.jump":
             direction = choice(args, "direction", "forward", tuple(self.jumps) + ("turn_left", "turn_right"))
             fraction = number(args, "fraction", 1.0, 0.1, 1)
+            if boolean(args, "hold_crouch", False):
+                steps = self._crouch_jump_steps(direction, fraction)
+                return self._start(op, self._crouch_jump(steps))
             rows = self._jump_rows(direction, fraction)
             return self._start(op, self._slot(rows, legs_only=direction.startswith("turn_")))
         if op == "motion.kick":
@@ -471,6 +482,7 @@ class Body:
                 if any(not 0 <= v.Data <= 16383 for v in values):
                     raise Fault("invalid_motion", "Servo position outside protocol range")
                 self.hardware.send(values, frames, pause)
+                self.servo_targets.update(((v.Id, v.Sio), v.Data) for v in values)
                 self.next_at = time.monotonic() + self.hardware.frame_s * (pause + 1)
             elif kind == "sleep":
                 self.next_at = time.monotonic() + max(0, args[0])
@@ -483,6 +495,7 @@ class Body:
                 return
             self.pose = "unknown"
             self.engine = None
+            self.servo_targets.clear()
             self.error = str(exc)
             try:
                 self.hardware.reset()
@@ -498,6 +511,7 @@ class Body:
         self.pose = "unknown"
         self.drive = None
         self.engine = None
+        self.servo_targets.clear()
         self.error = str(exc)[:240]
         self._finish("failed", self.error)
         try:
@@ -565,9 +579,9 @@ class Body:
                 engine = self._engine()
                 engine.first_Leg_Is_Right_Leg = drive["y"] < 0
                 yield from engine.walk_Cycle(
-                    drive["x"] * self.parameters["motion.max_step_mm"] * drive["speed"],
-                    abs(drive["y"]) * self.parameters["motion.max_side_mm"] * drive["speed"],
-                    drive["yaw"] * self.parameters["motion.max_yaw_rad"] * drive["speed"],
+                    drive["x"] * self.parameters["walk.max_step_mm"] * drive["speed"],
+                    abs(drive["y"]) * self.parameters["walk.max_side_mm"] * drive["speed"],
+                    drive["yaw"] * self.parameters["walk.max_yaw_rad"] * drive["speed"],
                     cycle, 1000000)
             cycle += 1
             self.jobs[self.active]["progress"] = cycle
@@ -621,6 +635,47 @@ class Body:
             frames = round(row[0] / factor)
             yield "servo", values, frames, frames - 1
         yield "drain",
+
+    def _crouch_jump_steps(self, direction, fraction):
+        if self.pose != "crouch":
+            raise Fault("invalid_state", "hold_crouch jump requires crouch; no automatic pose change")
+        ids = {5, 10} if direction.startswith("turn_") else (
+            {9, 10} if direction in ("forward", "backward") else {6, 10})
+        selected = [(i, servo, bus, sign) for i, (servo, bus, sign, *_) in
+                    enumerate(self.model.ACTIVESERVOS) if servo in ids]
+        if any((servo, bus) not in self.servo_targets for _, servo, bus, _ in selected):
+            raise Fault("invalid_state", "Missing commanded joint positions; select crouch first")
+        baseline = dict(self.servo_targets)
+        rows = self._jump_rows(direction, fraction)
+        if direction.startswith("turn_"):
+            # No neutral-pose preparation before a relative turn.
+            rows = rows[1:]
+        elif direction in ("forward", "backward"):
+            # Legacy first row puts the left ankle value in the knee column.
+            # For the relative variant mirror the right ankle, never move knees.
+            for row in rows:
+                row[13] = -row[2]
+        steps = []
+        for row in rows:
+            values = []
+            for index, servo, bus, sign in selected:
+                target = baseline[servo, bus] + round(row[index + 1] * sign)
+                if not 0 <= target <= 16383:
+                    raise Fault("invalid_motion", "Relative jump exceeds servo protocol range")
+                values.append(SimpleNamespace(Id=servo, Sio=bus, Data=target))
+            frames = round(row[0])
+            steps.append(("servo", values, frames, frames - 1))
+        return steps
+
+    def _crouch_jump(self, steps):
+        engine = self.engine
+        self.pose = "unknown"
+        self.engine = None
+        yield from steps
+        yield "drain",
+        # Only a completed return to the baseline may reuse the gait state.
+        self.pose = "crouch"
+        self.engine = engine
 
     def _jump_rows(self, direction, fraction):
         if direction.startswith("turn_"):

@@ -18,8 +18,8 @@ def test_walk_finishes_all_frames(tmp_path, step, side, yaw, right_first, height
     native = pytest.importorskip("starkit")
     assert getattr(native, "__file__", None), "This test must not use a fake IK solver"
     params = Parameters(tmp_path).values
-    params.update({"motion.step_height_mm": height, "motion.body_tilt": tilt,
-                   "motion.body_tilt_back": tilt, "motion.sole_skew": skew})
+    params.update({"walk.step_height_mm": height, "walk.body_tilt_forward": tilt,
+                   "walk.body_tilt_backward": tilt, "walk.sole_skew": skew})
     logs = []
     engine = Engine(params, log=lambda *a: logs.append(a))
     engine.first_Leg_Is_Right_Leg = right_first

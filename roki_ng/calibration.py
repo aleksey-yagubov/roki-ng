@@ -143,7 +143,6 @@ class TestPlan:
         engine = None if self.body.simulated else self.get_engine()
         if engine:
             engine.first_Leg_Is_Right_Leg = right_leg
-            engine.gaitHeight, engine.amplitude = 180, 32
             yield from engine.walk_Initial_Pose(start_mixing=False)
         else:
             yield "sleep", 0.01
@@ -155,7 +154,8 @@ class TestPlan:
             measured = self.yaw()
             correction = rotation
             if correction is None:
-                correction = max(-0.3, min(0.3, wrap(measured - self.origin) * 1.1
+                limit = self.parameters["walk.heading_max_correction_rad"]
+                correction = max(-limit, min(limit, wrap(measured - self.origin) * self.parameters["walk.heading_kp"]
                                            * (-1 if right_leg else 1)))
             stride = step * ((cycle + 1) / 3 if ramp and cycle < 2 else 1)
             if engine:

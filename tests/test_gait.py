@@ -12,7 +12,7 @@ def test_step_height_parameter(tmp_path):
     from roki_ng.wire import Fault
 
     params = Parameters(tmp_path)
-    key = "motion.step_height_mm"
+    key = "walk.step_height_mm"
     assert params.describe(key)["apply"] == "next_job"
     assert params.values[key] == 40
     body = Body({"simulate": True, "parameters": dict(params.values)},
