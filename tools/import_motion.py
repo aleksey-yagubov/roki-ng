@@ -33,6 +33,19 @@ class HardwareOnly(ast.NodeTransformer):
                  "self.glob.monitor_is_on": False, "self.glob.record_motions": False,
                  "self.with_Vision": False}
 
+    def visit_FunctionDef(self, node):
+        node = self.generic_visit(node)
+        if node.name == "walk_Final_Pose":
+            # The upstream 233 mm target exceeds our 221.8 mm leg model.
+            for child in ast.walk(node):
+                if isinstance(child, ast.Constant) and child.value == 233.0:
+                    child.value = 215.0
+        if node.name == "kick":
+            for child in ast.walk(node):
+                if isinstance(child, ast.Constant) and child.value == "SOLE_LANDING_SKEW":
+                    child.value = "KICK_SOLE_LANDING_SKEW"
+        return node
+
     def visit_Attribute(self, node):
         key = ast.unparse(node)
         return ast.Constant(self.constants[key]) if key in self.constants else self.generic_visit(node)

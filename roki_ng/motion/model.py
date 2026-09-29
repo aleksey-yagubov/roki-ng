@@ -68,7 +68,6 @@ class Robot:
         self.fr1 =8                  # frame number for 1-st phase of gait ( two legs on floor)
         self.fr2 = 12                # frame number for 2-nd phase of gait ( one leg in air)
         self.gaitHeight= 180         # Distance between Center of mass and floor in walk pose
-        self.stepHeight = 40 #32.0       # elevation of sole over floor
         self.LIMALPHA[3][1]=0
  #  end of  paramenetrs Not recommended for change
 

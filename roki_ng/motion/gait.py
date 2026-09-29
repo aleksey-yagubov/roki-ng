@@ -320,8 +320,9 @@ class GaitAlgorithms:
             self.xr, self.xl = (self.params['BODY_TILT_AT_WALK'], self.params['BODY_TILT_AT_WALK'])
         for j in range(self.initPoses):
             start1 = time.perf_counter()
-            self.ztr = -self.gaitHeight - (j + 1) * (233.0 - self.gaitHeight) / self.initPoses
-            self.ztl = -self.gaitHeight - (j + 1) * (233.0 - self.gaitHeight) / self.initPoses
+            # Leave extension margin below the 221.8 mm model length.
+            self.ztr = -self.gaitHeight - (j + 1) * (215.0 - self.gaitHeight) / self.initPoses
+            self.ztl = -self.gaitHeight - (j + 1) * (215.0 - self.gaitHeight) / self.initPoses
             self.ytr = -self.d10 - (self.initPoses - (j + 1)) * self.amplitude / 2 / self.initPoses
             self.ytl = self.d10 - (self.initPoses - (j + 1)) * self.amplitude / 2 / self.initPoses
             if j == self.initPoses - 1:
@@ -432,7 +433,7 @@ class GaitAlgorithms:
         dx0_typical = self.stepLength / (2 * self.fr1 + self.fr2 + 2 * framestep) * framestep
         xr_old, xl_old, yr_old, yl_old = (self.xr, self.xl, self.yr, self.yl)
         self.xr, self.xl = (self.params['BODY_TILT_AT_KICK'], self.params['BODY_TILT_AT_KICK'])
-        self.yr, self.yl = (-self.params['SOLE_LANDING_SKEW'], self.params['SOLE_LANDING_SKEW'])
+        self.yr, self.yl = (-self.params['KICK_SOLE_LANDING_SKEW'], self.params['KICK_SOLE_LANDING_SKEW'])
         fase_offset = 0.7
         yield ('drain',)
         for iii in range(0, frameNumberPerCycle, framestep):

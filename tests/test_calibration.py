@@ -293,7 +293,7 @@ def test_operator_measurement_round_trip(tmp_path):
             await client.request("test.measure", {"job_id": job["job_id"], "values": {"motion.run_10_mm": 987}})
             assert json.loads((tmp_path / "parameters.json").read_text())["motion.run_10_mm"] == 987
             with pytest.raises(Fault):
-                await client.request("test.measure", {"job_id": job["job_id"], "values": {"motion.body_tilt": 0.1}})
+                await client.request("test.measure", {"job_id": job["job_id"], "values": {"walk.body_tilt_forward": 0.1}})
         finally:
             await client.close()
             await supervisor.close()
