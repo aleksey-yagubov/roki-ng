@@ -43,7 +43,7 @@ def complete(body):
 
 def walk(body, hold=True):
     body._start("motion.drive", body._walk(cycles=2, fixed={
-        "x": 1, "y": 0, "yaw": 0, "speed": 0.5, "hold_crouch": hold}))
+        "x": 1, "y": 0, "yaw": 0, "speed": 0.5, "crouch": "on" if hold else "off"}))
     complete(body)
 
 
@@ -53,8 +53,8 @@ def test_hold_crouch_preserves_engine_and_terminal_cycle(body):
     assert engine.initial == 1
     assert engine.cycles[-1] == (0, 0, 0, 0, 1)
     assert body.pose == "crouch"
-    body.command("motion.drive", {"x": 1})
-    body.command("motion.drive", {"x": 0})
+    body.command("motion.drive", {"x": 1, "crouch": "on"})
+    body.command("motion.drive", {"x": 0, "crouch": "on"})
     complete(body)
     walk(body)
     assert body.engine is engine
@@ -64,12 +64,12 @@ def test_hold_crouch_preserves_engine_and_terminal_cycle(body):
 @pytest.mark.parametrize("pose", ["unknown", "stand", "base_stand"])
 def test_walk_prepares_from_other_poses_on_new_command(body, pose):
     body.pose = pose
-    body.command("motion.drive", {"x": 0})
+    body.command("motion.drive", {"x": 0, "crouch": "on"})
     assert body.active is None
     assert body.pose == pose
-    body.command("motion.drive", {"x": 1})
+    body.command("motion.drive", {"x": 1, "crouch": "on"})
     # Stop before the first cycle, but execute preparation and drain.
-    body.command("motion.drive", {"x": 0})
+    body.command("motion.drive", {"x": 0, "crouch": "on"})
     complete(body)
     assert body.pose == "crouch"
     assert body.engine.initial == 1
@@ -111,12 +111,12 @@ def test_stand_after_walk_discards_engine(body):
 
 def test_hard_stop_discards_engine_and_does_not_resume(body):
     walk(body)
-    body.command("motion.drive", {"x": 1})
+    body.command("motion.drive", {"x": 1, "crouch": "on"})
     body.command("motion.stop_hard", {})
     assert body.engine is None
     assert body.pose == "unknown"
     assert body.drive is body.active is None
-    body.command("motion.drive", {"x": 1})
-    body.command("motion.drive", {"x": 0})
+    body.command("motion.drive", {"x": 1, "crouch": "on"})
+    body.command("motion.drive", {"x": 0, "crouch": "on"})
     complete(body)
     assert body.engine.initial == 1

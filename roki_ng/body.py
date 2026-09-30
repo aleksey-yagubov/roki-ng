@@ -13,6 +13,12 @@ import uuid
 from .motion.model import Robot
 from .wire import Fault, boolean, choice, number, page
 from .calibration import TestPlan, TITLES, MEASUREMENTS, describe
+from .calibration import quaternion_yaw, wrap
+from .motion import slots
+from .body_imu import BodyImu
+from .body_servos import BodyServos
+from .stabilization import CrouchStabilizer
+from .stabilization_diagnostics import StabilizationDiagnostics
 
 ASSETS = Path(__file__).with_name("assets")
 
@@ -102,8 +108,19 @@ class RokiHardware:
             raise Fault("imu_invalid", "Body IMU response must contain 8 bytes")
         return tuple(value / 16384 for value in struct.unpack("<hhhh", bytes(raw)))
 
+    def body_positions(self):
+        ok, raw = self.rcb.moveRamToComCmdSynchronize(0x0070, 60)
+        self.check(ok, self.rcb)
+        if len(raw) != 60:
+            raise Fault("servo_data_invalid", "Body positions response must contain 60 bytes")
+        return struct.unpack("<30h", bytes(raw))
+
 
 class SimHardware:
+    def body_positions(self):
+        # Synthetic neutral feedback; never pretend it follows commanded targets.
+        return (0,) * 30
+
     def check_queue(self):
         pass
 
@@ -159,8 +176,22 @@ class Body:
         self.probe_successes = 0
         self.recovery_active = False
         self.model = Robot()
+        self.hip_limits = {(servo, bus): sorted((7500 + low * sign, 7500 + high * sign))
+                           for servo, bus, sign, _, low, high, *_ in self.model.ACTIVESERVOS
+                           if servo == 7}
         self.engine = None
         self.servo_targets = {}
+        self.sent_targets = {}
+        self.target_times = {}
+        self.body_servos = BodyServos(self.model)
+        self.servo_watch = False
+        self.body_imu = BodyImu()
+        self.stabilizer = CrouchStabilizer()
+        self.stabilization_diagnostics = StabilizationDiagnostics()
+        self.telemetry_watch = False
+        self.telemetry_at = 0
+        self.stabilization_warning = None
+        self.stabilization_log_at = 0
         self.pose = "unknown"
         self.control = False
         self.error = None
@@ -208,6 +239,22 @@ class Body:
             raise
 
     def _command(self, op, args):
+        if op == "body.telemetry.watch":
+            self.telemetry_watch = boolean(args, "enabled", False)
+            self.servo_watch = self.telemetry_watch and boolean(args, "servos", False)
+            self.telemetry_at = 0
+            return {}
+        if op == "body.telemetry.read":
+            if self.body_connected:
+                try:
+                    if boolean(args, "servos", False):
+                        self.body_servos.read(self)
+                    else:
+                        self.read_body_quaternion(max_age=0.02)
+                except Fault as exc:
+                    if exc.code not in ("body_busy", "imu_invalid", "servo_data_invalid"):
+                        raise
+            return self._body_telemetry()
         if op == "control.takeover":
             self.control = False
             self.command("motion.stop_hard", {})
@@ -256,7 +303,8 @@ class Body:
             return dict(job)
         if self.calibration_pending and op in (
                 "control.acquire", "params.apply", "test.start", "motion.pose", "motion.drive",
-                "motion.jump", "motion.slot", "motion.kick", "motion.head"):
+                "motion.jump", "motion.slot", "motion.kick", "motion.head",
+                "motion.get_up", "motion.splits"):
             raise Fault("busy", "Calibration parameters are being saved", True)
         if op == "control.acquire":
             if self.active:
@@ -285,11 +333,13 @@ class Body:
                 self.engine.configure(self.parameters)
             if geometry_changed:
                 self.engine = None
-                if self.pose == "crouch":
+                if self.pose in ("crouch", "crouch_centered"):
                     self.pose = "unknown"
             return {}
         if op == "motion.slots":
             return page(self.slots, args)
+        if op == "motion.joints":
+            return page(self.body_servos.catalog, args)
         if op == "job.status":
             job = self.jobs.get(args.get("job_id"))
             if job is None:
@@ -301,6 +351,10 @@ class Body:
             self.pose = "unknown"
             self.engine = None
             self.servo_targets.clear()
+            self.sent_targets.clear()
+            self.target_times.clear()
+            self.body_servos.invalidate("hard_stop")
+            self.stabilizer.reset("hard_stop")
             try:
                 self.hardware.reset()
             except Exception as exc:
@@ -339,14 +393,19 @@ class Body:
             tilt = number(args, "tilt", self.head["tilt"], -2600, 950, True)
             frames = number(args, "frames", 10, 1, 100, True)
             self.hardware.prepare_motion()
-            self.hardware.head([SimpleNamespace(Id=0, Sio=1, Data=7500 + pan),
-                                SimpleNamespace(Id=12, Sio=2, Data=7500 + tilt)], frames)
+            values = [SimpleNamespace(Id=0, Sio=1, Data=7500 + pan),
+                      SimpleNamespace(Id=12, Sio=2, Data=7500 + tilt)]
+            self.hardware.head(values, frames)
+            self.servo_targets.update(((v.Id, v.Sio), v.Data) for v in values)
+            self.sent_targets.update(((v.Id, v.Sio), v.Data) for v in values)
+            self.target_times.update(((v.Id, v.Sio), time.monotonic()) for v in values)
             self.head = {"pan": pan, "tilt": tilt}
             return {"accepted": True, "target": dict(self.head)}
         if op == "motion.drive":
             drive = {axis: number(args, axis, 0.0, -1, 1) for axis in ("x", "y", "yaw")}
             drive["speed"] = number(args, "speed", 0.5, 0.1, 1)
-            drive["hold_crouch"] = boolean(args, "hold_crouch", True)
+            drive["crouch"] = choice(args, "crouch", "off", ("off", "on", "centered"))
+            drive["heading_hold"] = boolean(args, "heading_hold", False)
             active = any(abs(drive[a]) > 0.05 for a in ("x", "y", "yaw"))
             if self.active and self.jobs[self.active]["operation"] != "motion.drive":
                 raise Fault("busy", "One-shot motion running", True)
@@ -362,23 +421,42 @@ class Body:
             raise Fault("motion_fault", self.error)
         if op == "motion.pose":
             name = choice(args, "name", None, ("base_stand", "crouch", "stand", "head_field"))
+            if name == "crouch" and choice(args, "crouch", "on", ("on", "centered")) == "centered":
+                name = "crouch_centered"
             return self._start(op, self._pose(name))
         if op == "motion.slot":
             name = args.get("name")
             if name not in self.slots:
                 raise Fault("not_found", "Unknown software slot")
             factor = number(args, "speed_factor", 1.0, 0.25, 2)
-            rows = json.loads((ASSETS / "slots" / f"{name}.json").read_text())[name]
+            document = json.loads((ASSETS / "slots" / f"{name}.json").read_text())
+            if "frames" in document:
+                steps = slots.decode(document, self.model, factor)
+                return self._start(op, self._individual_slot(steps))
+            if document.get("units", "kondo") != "kondo":
+                raise Fault("invalid_motion", "Legacy combined-knee rows require Kondo units")
+            rows = document[name]
             self._validate_rows(rows, factor)
             return self._start(op, self._slot(rows, factor))
         if op == "motion.jump":
             direction = choice(args, "direction", "forward", tuple(self.jumps) + ("turn_left", "turn_right"))
             fraction = number(args, "fraction", 1.0, 0.1, 1)
-            if boolean(args, "hold_crouch", False):
-                steps = self._crouch_jump_steps(direction, fraction)
-                return self._start(op, self._crouch_jump(steps))
+            crouch = choice(args, "crouch", "off", ("off", "on", "centered"))
+            if crouch != "off":
+                target = "crouch_centered" if crouch == "centered" else "crouch"
+                if self.pose == target or self.pose == "base_stand":
+                    steps = self._relative_jump_steps(direction, fraction)
+                    return self._start(op, self._relative_jump(steps))
+                return self._start(op, self._prepare_jump(direction, fraction, target))
             rows = self._jump_rows(direction, fraction)
             return self._start(op, self._slot(rows, legs_only=direction.startswith("turn_")))
+        if op == "motion.get_up":
+            crouch = choice(args, "crouch", "off", ("off", "on", "centered"))
+            return self._start(op, self._get_up(crouch))
+        if op == "motion.splits":
+            kind = choice(args, "kind", "small", ("small", "big"))
+            crouch = choice(args, "crouch", "off", ("off", "on", "centered"))
+            return self._start(op, self._splits(kind, crouch))
         if op == "motion.kick":
             leg = choice(args, "leg", "right", ("right", "left"))
             power = number(args, "power", 80, 1, 100, True)
@@ -458,9 +536,17 @@ class Body:
                 self._link_lost(exc)
                 return
         if not self.body_connected:
+            self._publish_body_telemetry()
+            return
+        self._tick_body_imu()
+        self._tick_body_servos()
+        if not self.body_connected:
             return
         if not self.plan:
+            self._tick_stabilization()
+            self._publish_body_telemetry()
             return
+        self.stabilizer.freeze("motion")
         try:
             self.hardware.check_queue()
             if time.monotonic() < self.next_at:
@@ -481,8 +567,7 @@ class Body:
                     raise Fault("invalid_motion", "Invalid servo frame")
                 if any(not 0 <= v.Data <= 16383 for v in values):
                     raise Fault("invalid_motion", "Servo position outside protocol range")
-                self.hardware.send(values, frames, pause)
-                self.servo_targets.update(((v.Id, v.Sio), v.Data) for v in values)
+                self._send_targets(values, frames, pause)
                 self.next_at = time.monotonic() + self.hardware.frame_s * (pause + 1)
             elif kind == "sleep":
                 self.next_at = time.monotonic() + max(0, args[0])
@@ -496,6 +581,10 @@ class Body:
             self.pose = "unknown"
             self.engine = None
             self.servo_targets.clear()
+            self.sent_targets.clear()
+            self.target_times.clear()
+            self.body_servos.invalidate("motion_fault")
+            self.stabilizer.reset("motion_fault")
             self.error = str(exc)
             try:
                 self.hardware.reset()
@@ -503,6 +592,141 @@ class Body:
                 self.error += f"; reset failed: {reset_error}"
             self.log("ERROR", self.error)
             self._finish("failed", self.error)
+        finally:
+            self._publish_body_telemetry()
+
+    def read_body_quaternion(self, max_age=0.0):
+        return self.body_imu.read(self.hardware, max_age=max_age)
+
+    def _body_telemetry(self):
+        now = time.monotonic()
+        return {"body.imu": self.body_imu.state(now),
+                "body.servos": self.body_servos.state(now),
+                "body.stabilization": self.stabilizer.state(self.parameters) | {
+                    "diagnostics": self.stabilization_diagnostics.result,
+                    "source_mono_ns": int(now * 1e9), "valid": self.body_connected}}
+
+    def _publish_body_telemetry(self):
+        now = time.monotonic()
+        self.stabilization_diagnostics.tick(self, now)
+        warning = self.stabilizer.reason if self.stabilizer.reason in (
+            "imu_stale", "tilt_outside_range", "joint_limit") else (
+                "saturated" if self.stabilizer.saturated and self.stabilizer.reason == "regulating" else None)
+        if (self.parameters["stabilization.enabled"] and warning
+                and warning != self.stabilization_warning and now >= self.stabilization_log_at):
+            self.log("WARNING", f"Crouch stabilization: {warning}; "
+                     f"correction={self.stabilizer.offset_deg:.3f} deg")
+            self.stabilization_log_at = now + 1
+        self.stabilization_warning = warning
+        if self.telemetry_watch and now >= self.telemetry_at:
+            self.telemetry_at = now + 0.1
+            self.emit("body.telemetry", self._body_telemetry())
+
+    def _tick_body_imu(self):
+        if not (self.telemetry_watch or self.parameters["body_imu.poll_enabled"]
+                or self.parameters["stabilization.diagnostics_enabled"]
+                or self.parameters["stabilization.enabled"]):
+            return
+        now = time.monotonic()
+        # Servo deadlines take precedence. No backlog of missed polling periods.
+        if now < self.body_imu.next_at or (self.plan and now >= self.next_at):
+            return
+        try:
+            self.read_body_quaternion()
+        except Fault as exc:
+            if exc.code == "imu_invalid":
+                if self.body_imu.invalid == 1 or self.body_imu.invalid % 50 == 0:
+                    self.log("WARNING", f"Body IMU rejected: {exc}")
+            elif exc.code != "body_busy":
+                self._link_lost(exc)
+        except OSError as exc:
+            self._link_lost(exc)
+
+    def _send_targets(self, values, frames, pause):
+        offsets = self.stabilizer.ticks(self.stabilizer.offset_deg)
+        corrected = [SimpleNamespace(Id=v.Id, Sio=v.Sio,
+                     Data=v.Data + offsets.get((v.Id, v.Sio), 0)) for v in values]
+        if any(not 0 <= v.Data <= 16383 for v in corrected):
+            raise Fault("invalid_motion", "Corrected servo position outside protocol range")
+        for value in corrected:
+            key = value.Id, value.Sio
+            if offsets.get(key, 0):
+                low, high = self.hip_limits[key]
+                if not low <= value.Data <= high:
+                    raise Fault("invalid_motion", "Frozen stabilization correction exceeds hip limit")
+        self.hardware.send(corrected, frames, pause)
+        # Relative trajectories start from nominal targets, never corrected ones.
+        self.servo_targets.update(((v.Id, v.Sio), v.Data) for v in values)
+        self.sent_targets.update(((v.Id, v.Sio), v.Data) for v in corrected)
+        self.target_times.update(((v.Id, v.Sio), time.monotonic()) for v in corrected)
+
+    def _tick_body_servos(self):
+        now = time.monotonic()
+        if (not self.body_connected
+                or not (self.servo_watch or self.parameters["stabilization.diagnostics_enabled"])
+                or now < self.body_servos.next_at
+                or (self.plan and now >= self.next_at)):
+            return
+        try:
+            self.body_servos.read(self)
+        except Fault as exc:
+            if exc.code == "servo_data_invalid":
+                if self.body_servos.invalid == 1 or self.body_servos.invalid % 25 == 0:
+                    self.log("WARNING", f"Body positions rejected: {exc}")
+            elif exc.code != "body_busy":
+                self._link_lost(exc)
+        except OSError as exc:
+            self._link_lost(exc)
+
+    def _release_stabilization(self):
+        # An absolute trajectory owns its next interpolated target. Do not send a
+        # separate zero-correction pose before it. No physical motion happens here.
+        self.servo_targets.update(self.sent_targets)
+        self.stabilizer.reset("absolute_motion")
+
+    def _tick_stabilization(self):
+        regulator = self.stabilizer
+        if not self.parameters["stabilization.enabled"]:
+            regulator.freeze("disabled")
+            return
+        if self.pose not in ("crouch", "crouch_centered") or self.error:
+            regulator.freeze("pose_not_supported")
+            return
+        hips = ((7, 1), (7, 2))
+        if any(key not in self.servo_targets for key in hips):
+            regulator.freeze("missing_targets")
+            return
+        try:
+            if not self.hardware.drained():
+                regulator.freeze("queue_busy")
+                return
+            proposed = regulator.propose(self.body_imu, self.parameters, time.monotonic())
+            if proposed is None:
+                return
+            offsets = regulator.ticks(proposed)
+            # Respect the model's hip bounds as well as the wire range. The model
+            # stores angles before FACTOR, so convert its limits to wire targets.
+            targets = []
+            for servo, bus in hips:
+                data = self.servo_targets[servo, bus] + offsets[servo, bus]
+                lo, hi = self.hip_limits[servo, bus]
+                if not max(0, lo) <= data <= min(16383, hi):
+                    regulator.freeze("joint_limit")
+                    return
+                targets.append(SimpleNamespace(Id=servo, Sio=bus, Data=data))
+            if offsets == regulator.ticks(regulator.offset_deg):
+                regulator.offset_deg = proposed  # Accumulate only sub-tick slew.
+                return
+            frames = max(1, math.ceil(BodyImu.PERIOD_S / self.hardware.frame_s))
+            self.hardware.send(targets, frames, frames - 1)
+            self.sent_targets.update(((v.Id, v.Sio), v.Data) for v in targets)
+            self.target_times.update(((v.Id, v.Sio), time.monotonic()) for v in targets)
+            regulator.commit(proposed)
+        except (Fault, OSError) as exc:
+            if isinstance(exc, Fault) and exc.code == "body_busy":
+                regulator.freeze("queue_busy")
+            else:
+                self._link_lost(exc)
 
     def _link_lost(self, exc):
         changed = self.body_connected or self.error is None
@@ -512,6 +736,11 @@ class Body:
         self.drive = None
         self.engine = None
         self.servo_targets.clear()
+        self.sent_targets.clear()
+        self.target_times.clear()
+        self.body_servos.invalidate("link_lost")
+        self.body_imu.invalidate(str(exc)[:240])
+        self.stabilizer.reset("link_lost")
         self.error = str(exc)[:240]
         self._finish("failed", self.error)
         try:
@@ -540,6 +769,24 @@ class Body:
         if name == "stand" and self.pose == "unknown":
             yield from self._pose("base_stand")
             return
+        if name == "stand":
+            self._release_stabilization()
+        if name == "crouch_centered" or (name == "crouch" and self.pose in (
+                "crouch_centered", "splits_small", "splits_big")):
+            yield from self._static_crouch(name == "crouch_centered")
+            return
+        if name == "stand" and self.pose in ("splits_small", "splits_big", "crouch_centered"):
+            _, values = self._crouch_target(True, height=215)
+            # Match walk_Final_Pose's neutral arms at a reachable leg extension.
+            for value in values:
+                if value.Id in (1, 2, 3, 4):
+                    value.Data = 7500
+            frames = self.parameters["walk.crouch_transition_frames"]
+            self.pose, self.engine = "unknown", None
+            yield "servo", values, frames, frames - 1
+            yield "drain",
+            self.pose = "stand"
+            return
         if name == "crouch":
             # Entering gait from another pose must not reuse its foot geometry.
             self.engine = None
@@ -548,7 +795,12 @@ class Body:
             yield from self._slot(rows)
             yield from self._head(0, 0)
         elif self.simulated:
-            yield "sleep", 0.08
+            if name == "crouch":
+                _, values = self._crouch_target(False)
+                yield "servo", values, 4, 3
+                yield "drain",
+            else:
+                yield "sleep", 0.08
         elif name == "crouch":
             yield from self._engine().walk_Initial_Pose(start_mixing=False)
             yield "drain",
@@ -565,24 +817,38 @@ class Body:
         if self.pose != "crouch":
             yield from self._pose("crouch")
         cycle = 0
-        hold = True
+        crouch = (fixed or self.drive or {}).get("crouch", "off")
+        heading = None
         while True:
             drive = fixed if fixed is not None else self.drive
             active = fixed is not None or (drive and time.monotonic() < self.drive_deadline
                        and any(abs(drive[a]) > 0.05 for a in ("x", "y", "yaw")))
             if self.stop_requested or not active or (cycles is not None and cycle >= cycles):
                 break
-            hold = drive["hold_crouch"]
+            crouch = drive["crouch"]
+            right_first = drive["y"] < 0
+            rotation = drive["yaw"] * self.parameters["walk.max_yaw_rad"] * drive["speed"]
+            if drive.get("heading_hold", False) and abs(drive["yaw"]) <= 0.05:
+                measured = quaternion_yaw(self.read_body_quaternion())
+                if heading is None:
+                    heading = measured
+                limit = self.parameters["walk.heading_max_correction_rad"]
+                rotation = max(-limit, min(limit, wrap(measured - heading)
+                    * self.parameters["walk.heading_kp"] * (-1 if right_first else 1)))
+            else:
+                heading = None
             if self.simulated:
                 yield "sleep", 0.08
             else:
                 engine = self._engine()
-                engine.first_Leg_Is_Right_Leg = drive["y"] < 0
+                engine.first_Leg_Is_Right_Leg = right_first
                 yield from engine.walk_Cycle(
                     drive["x"] * self.parameters["walk.max_step_mm"] * drive["speed"],
                     abs(drive["y"]) * self.parameters["walk.max_side_mm"] * drive["speed"],
-                    drive["yaw"] * self.parameters["walk.max_yaw_rad"] * drive["speed"],
+                    rotation,
                     cycle, 1000000)
+            if drive.get("heading_hold", False):
+                yield "drain",
             cycle += 1
             self.jobs[self.active]["progress"] = cycle
             self.emit("job.progress", dict(self.jobs[self.active]))
@@ -591,10 +857,99 @@ class Body:
             yield from self._engine().walk_Cycle(0, 0, 0, 0, 1)
         yield "drain",
         self.pose = "crouch"
-        if not hold:
+        if crouch == "centered":
+            yield from self._static_crouch(True)
+        elif crouch == "off":
             yield from self._pose("stand")
 
+    def _crouch_target(self, centered, height=None):
+        if self.simulated:
+            # Protocol simulation has no IK or physical geometry. These neutral
+            # targets exist only to exercise selective-joint command bookkeeping.
+            addresses = {(s, b) for s, b, *_ in self.model.ACTIVESERVOS[:21]}
+            addresses.update(((13, 1), (13, 2)))
+            return None, [SimpleNamespace(Id=s, Sio=b, Data=7500)
+                          for s, b in sorted(addresses)]
+        from .motion.engine import Engine
+        engine = Engine(self.parameters, log=self.log)
+        if height is not None:
+            engine.gaitHeight = height
+        return engine, engine.crouch_target(centered)
+
+    def _static_crouch(self, centered, frames=None):
+        engine, values = self._crouch_target(centered)
+        frames = frames or self.parameters["walk.crouch_transition_frames"]
+        self.pose, self.engine = "unknown", None
+        yield "servo", values, frames, frames - 1
+        yield "drain",
+        self.pose = "crouch_centered" if centered else "crouch"
+        self.engine = engine
+
+    def _prepare_jump(self, direction, fraction, target):
+        yield from self._static_crouch(target == "crouch_centered")
+        yield from self._relative_jump(self._relative_jump_steps(direction, fraction))
+
+    def _individual_slot(self, steps):
+        self._release_stabilization()
+        self.pose, self.engine = "unknown", None
+        yield from steps
+        yield "drain",
+
+    def _splits(self, kind, crouch):
+        steps = slots.decode(slots.splits(kind == "big"), self.model)
+        # Always prepare before the deep entry, including a request from stand.
+        target = "crouch_centered" if crouch == "centered" else "crouch"
+        if self.pose != target:
+            yield from self._static_crouch(target == "crouch_centered")
+        yield from self._individual_slot(steps)
+        self.pose = f"splits_{kind}"
+
+    def _get_up(self, crouch):
+        from .recovery import SLOTS, stable_position
+        position = yield from stable_position(self)
+        if position is None:
+            return
+        job = self.jobs[self.active]
+        job.update(initial_posture=position, stage="getting_up")
+        self.emit("job.progress", dict(job))
+        target = "crouch_centered" if crouch == "centered" else "crouch"
+        if position == "upright":
+            yield from self._pose("base_stand" if crouch == "off" else target)
+            return
+        name = SLOTS[position]
+        rows = json.loads((ASSETS / "slots" / f"{name}.json").read_text())[name]
+        self.recovery_active = True
+        try:
+            if crouch == "off":
+                yield from self._slot(rows)
+                self.pose = "stand"
+            else:
+                engine, values = self._crouch_target(crouch == "centered")
+                steps = list(self._slot(rows))
+                # Side recovery has straight legs in every row: fold them from
+                # its first frame, retaining the original arm support sequence.
+                if position in ("left", "right"):
+                    legs = [v for v in values if 5 <= v.Id <= 10 or v.Id == 13]
+                    for index, step in enumerate(steps[:-1]):
+                        _, original, frames, pause = step
+                        steps[index] = ("servo", [v for v in original
+                            if not (5 <= v.Id <= 10 or v.Id == 13)] + legs, frames, pause)
+                # Back/stomach recovery ends directly in the calculated crouch,
+                # not in the old straight-leg last frame followed by sitting down.
+                frames = int(rows[-1][0])
+                steps[-2] = ("servo", values, frames, frames - 1)
+                yield from steps
+                self.engine, self.pose = engine, target
+            verified = yield from stable_position(self)
+            if verified != "upright":
+                raise Fault("get_up_failed", f"Body is still {verified}; no automatic retry")
+            job.update(stage="upright", posture_verified=True)
+            self.emit("job.progress", dict(job))
+        finally:
+            self.recovery_active = False
+
     def _kick(self, leg, power, offset):
+        self._release_stabilization()
         self.engine = None
         self.pose = "unknown"
         if self.simulated:
@@ -620,6 +975,7 @@ class Body:
 
     def _slot(self, rows, factor=1, *, legs_only=False):
         self._validate_rows(rows, factor)
+        self._release_stabilization()
         self.pose = "unknown"
         self.engine = None
         for row in rows:
@@ -636,9 +992,9 @@ class Body:
             yield "servo", values, frames, frames - 1
         yield "drain",
 
-    def _crouch_jump_steps(self, direction, fraction):
-        if self.pose != "crouch":
-            raise Fault("invalid_state", "hold_crouch jump requires crouch; no automatic pose change")
+    def _relative_jump_steps(self, direction, fraction):
+        if self.pose not in ("crouch", "crouch_centered", "base_stand"):
+            raise Fault("invalid_state", "Relative jump requires crouch or base_stand")
         ids = {5, 10} if direction.startswith("turn_") else (
             {9, 10} if direction in ("forward", "backward") else {6, 10})
         selected = [(i, servo, bus, sign) for i, (servo, bus, sign, *_) in
@@ -667,14 +1023,15 @@ class Body:
             steps.append(("servo", values, frames, frames - 1))
         return steps
 
-    def _crouch_jump(self, steps):
+    def _relative_jump(self, steps):
         engine = self.engine
+        pose = self.pose
         self.pose = "unknown"
         self.engine = None
         yield from steps
         yield "drain",
         # Only a completed return to the baseline may reuse the gait state.
-        self.pose = "crouch"
+        self.pose = pose
         self.engine = engine
 
     def _jump_rows(self, direction, fraction):

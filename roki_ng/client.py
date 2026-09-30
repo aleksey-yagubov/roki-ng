@@ -87,11 +87,11 @@ class Client:
             self.lease_epoch = 0
         return result
 
-    async def drive(self, x=0, y=0, yaw=0, speed=0.5, hold_crouch=True):
+    async def drive(self, x=0, y=0, yaw=0, speed=0.5, crouch="off", heading_hold=False):
         self.sequence += 1
         data = pack(envelope("sample", "motion.drive", {
             "lease_epoch": self.lease_epoch, "x": x, "y": y, "yaw": yaw,
-            "speed": speed, "hold_crouch": hold_crouch,
+            "speed": speed, "crouch": crouch, "heading_hold": heading_hold,
         }, session=self.session, token=self.token, sequence=self.sequence))
         await asyncio.get_running_loop().sock_sendto(self.sock, data, self.address)
 

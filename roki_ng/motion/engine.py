@@ -3,6 +3,8 @@
 from .gait import GaitAlgorithms
 from .model import Robot
 import logging
+from .gait import Servo
+from ..wire import Fault
 
 
 class Engine(Robot, GaitAlgorithms):
@@ -43,6 +45,27 @@ class Engine(Robot, GaitAlgorithms):
     def falling_Test(self):
         # Recovery is explicit in the worker. Never launch a get-up slot implicitly.
         return 0
+
+    def crouch_target(self, centered=False):
+        # Match the last legacy preparation frame, not its unreachable extended start.
+        self.first_Leg_Is_Right_Leg = True
+        self.xtr = self.xtl = self.xr = self.xl = self.yr = self.yl = 0
+        self.wr = self.wl = 0
+        self.zr = self.zl = -1
+        self.ztr = self.ztl = -self.gaitHeight if centered else (
+            self.ztr0 - (self.initPoses - 1) * (self.ztr0 + self.gaitHeight) / self.initPoses)
+        shift = 0 if centered else 24 * (self.initPoses - 1) / self.initPoses
+        self.ytr, self.ytl = -self.d10 - shift, self.d10 - shift
+        angles = self.computeAlphaForWalk()
+        if not angles:
+            raise Fault("invalid_motion", "Cannot solve requested crouch pose")
+        values = []
+        for angle, (servo, bus, sign, *_) in zip(angles, self.ACTIVESERVOS):
+            data = int(7500 + angle * 1698 * sign / (2 if servo == 8 else 1))
+            values.append(Servo(servo, bus, data))
+            if servo == 8:
+                values.append(Servo(13, bus, data))
+        return values
 
     def solve_leg(self, leg, *args):
         import starkit

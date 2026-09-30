@@ -155,7 +155,7 @@ def test_quaternion_protocol_and_wrap():
             quaternion_yaw(bad)
     angles = iter([3.1, -3.1, -3])
     fake_body = MagicMock(parameters={})
-    fake_body.hardware.body_quaternion.side_effect = lambda: (
+    fake_body.read_body_quaternion.side_effect = lambda: (
         lambda a: (0, 0, math.sin(a/2), math.cos(a/2)))(next(angles))
     plan = Plan(fake_body, {"name": "run_test"})
     assert plan.yaw() == pytest.approx(3.1)

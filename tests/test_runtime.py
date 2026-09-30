@@ -63,7 +63,7 @@ def test_walk_release_settles(tmp_path):
     body = Body({"simulate": True, "parameters": Parameters(tmp_path).values}, lambda *a: None, lambda *a: None)
     body.command("control.acquire", {})
     body.pose = "crouch"
-    job = body.command("motion.drive", {"x": 1, "hold_crouch": True})
+    job = body.command("motion.drive", {"x": 1, "crouch": "on"})
     body.tick()
     body.command("control.release", {})
     with pytest.raises(Fault, match="still stopping"):
@@ -110,7 +110,7 @@ def test_udp_processes(tmp_path):
             welcome = await client.connect()
             assert welcome["state"] == "IDLE"
             await observer.connect()
-            assert set(server.workers) == {"motherboard", "stream", "camera", "detection"}
+            assert set(server.workers) == {"motherboard", "stream", "camera", "detection", "localisation"}
             assert all(w.process.pid for w in server.workers.values())
             await client.request("control.acquire")
             with pytest.raises(Fault, match="Another operator"):
@@ -126,7 +126,7 @@ def test_udp_processes(tmp_path):
             assert status["status"] == "cancelled"
             await client.request("motion.pose", {"name": "crouch"})
             await asyncio.sleep(0.2)
-            await client.drive(x=0.5)
+            await client.drive(x=0.5, crouch="on")
             await asyncio.sleep(0.7)
             state = await client.request("data.snapshot", {"topic": "motion.state"})
             assert state["data"]["pose"] == "crouch"

@@ -110,7 +110,7 @@ class TestPlan:
         self.progress = 0
 
     def yaw(self):
-        current = quaternion_yaw(self.body.hardware.body_quaternion())
+        current = quaternion_yaw(self.body.read_body_quaternion())
         if self.previous_yaw is not None:
             self.unwrapped_yaw += wrap(current - self.previous_yaw)
         else:

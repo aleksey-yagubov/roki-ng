@@ -40,7 +40,7 @@ def test_relative_jump_returns_only_selected_joints(body, direction, ids, fracti
     sent = []
     body.hardware.send = lambda values, frames, pause: sent.append(values)
     job = body.command("motion.jump", {"direction": direction, "fraction": fraction,
-                                       "hold_crouch": True})
+                                       "crouch": "on"})
     finish(body)
     assert body.jobs[job["job_id"]]["status"] == "completed"
     assert sent
@@ -58,7 +58,7 @@ def test_relative_jump_returns_only_selected_joints(body, direction, ids, fracti
 
 
 def test_hard_stop_does_not_restore_crouch(body):
-    body.command("motion.jump", {"hold_crouch": True})
+    body.command("motion.jump", {"crouch": "on"})
     body.tick()
     assert body.pose == "unknown"
     body.command("motion.stop_hard", {})
@@ -68,20 +68,17 @@ def test_hard_stop_does_not_restore_crouch(body):
 
 
 def test_reject_before_sending_without_pose_or_targets(body):
-    body.pose = "stand"
-    with pytest.raises(Fault, match="requires crouch"):
-        body.command("motion.jump", {"hold_crouch": True})
     body.pose = "crouch"
     body.servo_targets.clear()
     with pytest.raises(Fault, match="Missing commanded"):
-        body.command("motion.jump", {"hold_crouch": True})
+        body.command("motion.jump", {"crouch": "on"})
     assert body.active is None and body.hardware.sent == 0
 
 
 def test_reject_out_of_range_before_any_motion(body):
     body.servo_targets[10, 1] = 0
     with pytest.raises(Fault, match="protocol range"):
-        body.command("motion.jump", {"direction": "turn_left", "hold_crouch": True})
+        body.command("motion.jump", {"direction": "turn_left", "crouch": "on"})
     assert body.active is None and body.hardware.sent == 0
 
 
@@ -89,7 +86,7 @@ def test_failed_send_discards_targets(body):
     def fail(*args):
         raise OSError("link lost")
     body.hardware.send = fail
-    job = body.command("motion.jump", {"hold_crouch": True})
+    job = body.command("motion.jump", {"crouch": "on"})
     finish(body)
     assert body.jobs[job["job_id"]]["status"] == "failed"
     assert body.pose == "unknown" and body.engine is None
