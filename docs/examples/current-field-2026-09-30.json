@@ -1,0 +1,23 @@
+{
+  "field.mark.00": {
+    "enabled": true,
+    "kind": "line",
+    "x": 1.425,
+    "y": 0.0,
+    "size": 2.35,
+    "size2": 0.1,
+    "angle": 1.5707963267948966,
+    "width": 0.02
+  },
+  "field.mark.01": {
+    "enabled": true,
+    "kind": "line",
+    "x": -1.425,
+    "y": 0.0,
+    "size": 2.35,
+    "size2": 0.1,
+    "angle": 1.5707963267948966,
+    "width": 0.02
+  },
+  "vision.yellow_posts.a_min": -20
+}
