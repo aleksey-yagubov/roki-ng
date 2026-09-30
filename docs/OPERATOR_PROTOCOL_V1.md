@@ -492,7 +492,7 @@ runtime camera используется camera.status.
 `camera.capabilities {}` и `video.capabilities {}` не открывают камеру. Ответ
 описывает backend и настроенные defaults, не выдаёт их за измеренный каталог
 сенсора: `sensor_modes_probed=false`, `settings_verified=false`. В первой версии
-реальное probe всех режимов не реализовано. `max_active=1`, `exact_osd=false`,
+реальное probe всех режимов не реализовано. `max_active=2`, `exact_osd=false`,
 `rtcp=false`, `live_update=[]`.
 
 Поле capabilities `backends`: `["direct-gst", "runtime"]`. Runtime не
@@ -536,7 +536,8 @@ Output: чётные width 160..1600 и height 120..1300, не больше се
 
 Destination IP берётся из сессии независимо от полей клиента. rtp_port:
 1024..65535. MTU: 576..1400, default 1400 (включая RTP header, без UDP/IP).
-До восьми определений видео суммарно, одновременно один активный pipeline.
+До восьми определений видео суммарно. Одновременно разрешены один runtime и
+один localisation pipeline с разными RTP-портами. Direct-gst эксклюзивен.
 
 | Операция | Аргументы помимо lease | Поведение |
 | --- | --- | --- |
@@ -584,7 +585,8 @@ UnicamSequence header extension и точного OSD. Реализация ос
 Доступны `system.workers`, `motion.state`, `camera.state`, `detection.state`.
 Это snapshots состояния процессов, не измеренная телеметрия серв/IMU. Body state:
 state (ready/fault), pose, active_job, head (заданные ticks), error, simulated.
-Camera state: state, active_stream, video_state, packets, simulated.
+Stream state: state, active_streams [{stream_id, backend, state}], packets,
+frames_submitted, frames_skipped, simulated.
 Также backend, frames_submitted, frames_skipped для runtime-video. Skipped
 учитывает видимые читателю пропуски/ограничение FPS, не все возможные потери сети.
 Detection state содержит running/profile/frames/error/result/age_ms;
