@@ -36,3 +36,30 @@ def test_walk_finishes_all_frames(tmp_path, step, side, yaw, right_first, height
     assert all(0 <= s.Data <= 16383 for cmd in frames for s in cmd[1])
     elbows = [s.Data for s in frames[-1][1] if s.Id == 4]
     assert elbows == [7500, 7500]
+
+
+@pytest.mark.parametrize("right", [True, False])
+@pytest.mark.parametrize("power", [30, 80, 100])
+def test_kick_on_fresh_engine(tmp_path, right, power):
+    pytest.importorskip("starkit")
+    params = Parameters(tmp_path).values
+    logs = []
+    engine = Engine(params, log=lambda *args: logs.append(args))
+    engine.kick_power = power
+    assert not hasattr(engine, "stepLength")
+    commands = list(engine.kick(right))
+    frames = [cmd for cmd in commands if cmd[0] == "servo"]
+    assert frames
+    assert engine.exitFlag == 0, logs
+    assert not logs
+    assert engine.ztr == engine.ztl == -215
+    assert engine.gaitHeight == params["walk.gait_height_mm"]
+    assert all(0 <= servo.Data <= 16383 for cmd in frames for servo in cmd[1])
+
+
+def test_kick_does_not_depend_on_previous_stride(tmp_path):
+    pytest.importorskip("starkit")
+    params = Parameters(tmp_path).values
+    fresh, stale = Engine(params), Engine(params)
+    stale.stepLength = -64
+    assert list(fresh.kick(True)) == list(stale.kick(True))

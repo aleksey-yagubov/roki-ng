@@ -378,8 +378,8 @@ class GaitAlgorithms:
         yield ('drain',)
         for j in range(pose_taking_cycles):
             start1 = time.perf_counter()
-            self.ztr = -self.gaitHeight - (j + 1) * (233.0 - self.gaitHeight) / pose_taking_cycles
-            self.ztl = -self.gaitHeight - (j + 1) * (233.0 - self.gaitHeight) / pose_taking_cycles
+            self.ztr = -self.gaitHeight - (j + 1) * (215.0 - self.gaitHeight) / pose_taking_cycles
+            self.ztl = -self.gaitHeight - (j + 1) * (215.0 - self.gaitHeight) / pose_taking_cycles
             self.ytr = -self.d10 - (pose_taking_cycles - (j + 1)) * self.amplitude / 2 / pose_taking_cycles
             self.ytl = self.d10 - (pose_taking_cycles - (j + 1)) * self.amplitude / 2 / pose_taking_cycles
             if j == pose_taking_cycles - 1:
@@ -430,7 +430,7 @@ class GaitAlgorithms:
         alpha01 = math.pi / self.fr1 * 2
         frameNumberPerCycle = 2 * self.fr1 + 2 * self.fr2
         framestep = self.simThreadCycleInMs // 10
-        dx0_typical = self.stepLength / (2 * self.fr1 + self.fr2 + 2 * framestep) * framestep
+        dx0_typical = stepLength / (2 * self.fr1 + self.fr2 + 2 * framestep) * framestep
         xr_old, xl_old, yr_old, yl_old = (self.xr, self.xl, self.yr, self.yl)
         self.xr, self.xl = (self.params['BODY_TILT_AT_KICK'], self.params['BODY_TILT_AT_KICK'])
         self.yr, self.yl = (-self.params['KICK_SOLE_LANDING_SKEW'], self.params['KICK_SOLE_LANDING_SKEW'])

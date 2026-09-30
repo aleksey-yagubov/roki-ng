@@ -35,12 +35,18 @@ class HardwareOnly(ast.NodeTransformer):
 
     def visit_FunctionDef(self, node):
         node = self.generic_visit(node)
-        if node.name == "walk_Final_Pose":
+        if node.name in ("walk_Final_Pose", "walk_Final_Pose_After_Kick"):
             # The upstream 233 mm target exceeds our 221.8 mm leg model.
             for child in ast.walk(node):
                 if isinstance(child, ast.Constant) and child.value == 233.0:
                     child.value = 215.0
         if node.name == "kick":
+            class KickStride(ast.NodeTransformer):
+                def visit_Attribute(self, child):
+                    if ast.unparse(child) == "self.stepLength":
+                        return ast.copy_location(ast.Name("stepLength", child.ctx), child)
+                    return self.generic_visit(child)
+            node = KickStride().visit(node)
             for child in ast.walk(node):
                 if isinstance(child, ast.Constant) and child.value == "SOLE_LANDING_SKEW":
                     child.value = "KICK_SOLE_LANDING_SKEW"
