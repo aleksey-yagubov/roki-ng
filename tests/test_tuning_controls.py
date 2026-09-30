@@ -139,3 +139,56 @@ def test_batch_get_waits_for_in_progress_parameter_transaction(tmp_path):
         s.parameter_lock.release()
         assert await task == {'values': {'camera.exposure_us': 5000}}
     asyncio.run(run())
+
+
+def test_unavailable_localisation_does_not_block_detector_settings(tmp_path):
+    async def run():
+        s = server(tmp_path)
+        s.workers['localisation'].call.side_effect = Fault('worker_unavailable', 'localisation')
+        key = 'vision.orange_ball.pixels_min'
+        await s.dispatch(None, 'params.set', {'key': key, 'value': 51})
+        s.workers['detection'].call.assert_awaited_once_with('params.apply', {key: 51})
+        assert Parameters(tmp_path).values[key] == 51
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('error', ['invalid_argument', 'worker_timeout'])
+def test_live_localisation_rejection_still_rolls_back_detector(tmp_path, error):
+    async def run():
+        s = server(tmp_path)
+        s.workers['localisation'].call.side_effect = Fault(error, 'apply failed')
+        key = 'vision.orange_ball.pixels_min'
+        with pytest.raises(Fault) as caught:
+            await s.dispatch(None, 'params.set', {'key': key, 'value': 51})
+        assert caught.value.code == error
+        assert s.workers['detection'].call.call_args_list[-1].args == ('params.apply', {key: 50})
+        assert Parameters(tmp_path).values[key] == 50
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('settings,code', [
+    ({}, None),
+    ({'frame_duration_us': 16667, 'exposure_us': 8000, 'gain': 1.0}, None),
+    ({'frame_duration_us': 33333}, 'restart_required'),
+    ({'exposure_us': 9000}, 'restart_required'),
+    ({'gain': 2.0}, 'restart_required'),
+    ({'with_imu': False}, 'restart_required'),
+    ({'frame_duration_us': 0}, 'invalid_argument'),
+    ({'exposure_us': 20000}, 'invalid_argument'),
+])
+def test_running_camera_start_checks_requested_settings(tmp_path, settings, code):
+    async def run():
+        state = {'prepared': True, 'running': True, 'frame_duration_us': 16667,
+                 'imu_sync': {'state': 'synced'},
+                 'requested_controls': {'exposure_us': 8000, 'gain': 1.0}}
+        s = server(tmp_path, state)
+        s.mode = 'MANUAL'
+        s.workers['stream'] = SimpleNamespace(call=AsyncMock(return_value={'active_streams': []}))
+        if code:
+            with pytest.raises(Fault) as caught:
+                await s.dispatch(None, 'camera.start', settings)
+            assert caught.value.code == code
+        else:
+            assert await s.dispatch(None, 'camera.start', settings) == state
+        s.workers['camera'].call.assert_awaited_once_with('camera.status')
+    asyncio.run(run())

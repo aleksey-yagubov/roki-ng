@@ -17,6 +17,8 @@ def runtime_paint_mask(image, parameters=None):
         roi=np.zeros(green.shape,np.uint8)
         cv2.fillConvexPoly(roi,cv2.convexHull(max(contours,key=cv2.contourArea)),255)
         roi=cv2.erode(roi,np.ones((5,5),np.uint8))
+        if not np.any(roi):
+            raise ValueError('No turf region after erosion')
         full_lab=cv2.cvtColor(image,cv2.COLOR_BGR2LAB)
         white=mask(full_lab,parameters,'white_marking')
     else:
@@ -29,6 +31,8 @@ def runtime_paint_mask(image, parameters=None):
     return white & cv2.resize(roi,(800,650),interpolation=cv2.INTER_NEAREST)
 
 def clusters(values, count):
+    if len(values) < count:
+        raise ValueError('Insufficient pixels for colour clustering')
     cv2.setRNGSeed(17)
     sample=np.ascontiguousarray(values[::max(1,(len(values)+5999)//6000)],np.float32)
     _,_,centres=cv2.kmeans(sample,count,None,(cv2.TERM_CRITERIA_EPS+cv2.TERM_CRITERIA_MAX_ITER,60,.1),3,cv2.KMEANS_PP_CENTERS)
@@ -73,6 +77,8 @@ def segment(image,parameters=None):
     roi=np.zeros((h,w),np.uint8)
     cv2.fillConvexPoly(roi,cv2.convexHull(max(contour,key=cv2.contourArea)),255)
     roi=cv2.erode(roi,np.ones((5,5),np.uint8))
+    if np.count_nonzero(roi) < 3:
+        raise ValueError('Insufficient turf region after erosion')
     local=clusters(lab[roi!=0],3)
     # Paint is the bright, near-neutral cluster; a green cluster is never white.
     white_id=min(range(3),key=lambda i:float(np.linalg.norm(local[i,1:]-128)-local[i,0]*.25))

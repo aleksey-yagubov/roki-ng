@@ -25,6 +25,9 @@ class Localisation:
         self.parameter_revision=0
         self.configuration_id=None
         self.geometry=None
+        self.video_error = None
+        self.reported_error = None
+        self.reported_video_error = None
 
     def state(self):
         result=dict(self.result) if self.result else None
@@ -76,6 +79,7 @@ class Localisation:
         self.stop_event=threading.Event()
         self.generation+=1
         self.result=self.error=None
+        self.video_error = self.reported_error = self.reported_video_error = None
         self.frames=self.dropped=0
         self.capture_id=args['capture_id']
         self.configuration_id=configuration
@@ -94,7 +98,6 @@ class Localisation:
             from .field_observations import runtime_paint_mask,detect_circle,observations
             from .goal_observations import goal_candidates,paired_bearings,mapped_candidates,upright_candidates
             cv2.setNumThreads(1)
-            debug_channel=Channel(LOCALISATION_TOPIC,publisher=True)
             channels=[Channel(FRAME_TOPIC),Channel(IMU_TOPIC)]
             iox=channels[0].iox
             waitset=iox.WaitSetBuilder.new().create(iox.ServiceType.Ipc)
@@ -170,14 +173,21 @@ class Localisation:
                 # Stop invalidates calculations already in flight.
                 if self.stop_event.is_set() or self.generation!=generation:break
                 if revision!=self.parameter_revision:continue
-                from .localisation_debug import video_frame
-                annotated=video_frame(image,projector,imu[2:6],lines,circle,posts,result,engine.model,engine.circles)
-                if self.stop_event.is_set() or self.generation!=generation:break
-                result['processing_ms']=round((time.monotonic()-started)*1000)
-                with debug_channel.loan(FRAME_BYTES) as target:
-                    FRAME_HEADER.pack_into(target,0,*header)
-                    target[FRAME_HEADER.size:]=annotated.tobytes()
                 self.result=result;self.last_measurement=received;self.frames+=1
+                if self.video_error is None:
+                    try:
+                        if debug_channel is None:
+                            debug_channel=Channel(LOCALISATION_TOPIC,publisher=True)
+                        from .localisation_debug import video_frame
+                        annotated=video_frame(image,projector,imu[2:6],lines,circle,posts,result,engine.model,engine.circles)
+                        if self.stop_event.is_set() or self.generation!=generation:break
+                        with debug_channel.loan(FRAME_BYTES) as target:
+                            FRAME_HEADER.pack_into(target,0,*header)
+                            target[FRAME_HEADER.size:]=annotated.tobytes()
+                    except Exception as exc:
+                        # A failed diagnostic sink must not stop pose estimation.
+                        # Disable it until the next localisation.start, without a retry loop.
+                        self.video_error = str(exc)[:200]
                 next_compute=time.monotonic()+.2
         except Exception as exc:
             if not self.stop_event.is_set():
@@ -189,8 +199,13 @@ class Localisation:
             if debug_channel is not None:debug_channel.close()
 
     def tick(self):
-        # Worker heartbeat carries bounded state. Avoid per-frame events.
-        pass
+        if self.error is not None and self.error != self.reported_error:
+            self.log('ERROR', f'Localisation stopped: {self.error}')
+            self.emit('localisation.fault', {'error': self.error})
+            self.reported_error = self.error
+        if self.video_error is not None and self.video_error != self.reported_video_error:
+            self.log('WARNING', f'Localisation video disabled; computation continues: {self.video_error}')
+            self.reported_video_error = self.video_error
 
     def close(self):
         self.generation+=1

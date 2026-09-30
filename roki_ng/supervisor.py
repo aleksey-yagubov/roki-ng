@@ -615,6 +615,20 @@ class Supervisor:
                     raise Fault("busy", "Stop direct-gst before starting capture")
                 camera=await self.workers["camera"].call("camera.status")
                 if camera.get('running') and (not with_imu or camera.get('imu_sync',{}).get('state') in ('aligning','matched','synced')):
+                    if not with_imu and camera.get('imu_sync', {}).get('state') != 'disabled':
+                        raise Fault('restart_required', 'IMU capture is active; stop capture explicitly before disabling it')
+                    duration = number(body, 'frame_duration_us', camera['frame_duration_us'], 8333, 100000, True)
+                    controls = camera.get('requested_controls', {})
+                    requested = {'frame_duration_us': duration}
+                    current = {'frame_duration_us': camera['frame_duration_us']}
+                    for key, control, low, high, integer in (
+                            ('exposure_us', 'exposure_us', 1, duration, True),
+                            ('gain', 'gain', 1.0, 16.0, False)):
+                        if key in body:
+                            requested[key] = number(body, key, None, low, high, integer)
+                            current[key] = controls.get(control)
+                    if requested != current:
+                        raise Fault('restart_required', 'Camera settings differ; stop capture explicitly before reconfiguration')
                     return camera
                 if camera["prepared"]:
                     raise Fault("busy", "Camera already prepared without requested IMU; stop capture explicitly to reconfigure")
@@ -722,7 +736,14 @@ class Supervisor:
                     if role=='localisation' and role not in self.workers:continue
                     if update:
                         previous = {k: self.params.values[k] for k in update}
-                        response=await self.workers[role].call("params.apply", update)
+                        try:
+                            response=await self.workers[role].call("params.apply", update)
+                        except Fault as exc:
+                            if role != 'localisation' or exc.code != 'worker_unavailable':
+                                raise
+                            # Localisation receives the complete parameter snapshot on start.
+                            self.log('supervisor', 'WARNING', 'Localisation unavailable; parameters will apply on its next start')
+                            continue
                         # Camera.start may override persistent manual values for
                         # this capture. Roll back the actual controls, not defaults.
                         if role=='camera' and isinstance(response,dict) and set(response.get('previous',{}))==set(update):

@@ -269,7 +269,9 @@ def test_imu_continues_across_two_full_counter_periods(monkeypatch):
 def test_start_existing_synchronized_camera_does_not_interrupt_video(tmp_path):
     async def run():
         server,calls,session=server_setup(tmp_path)
-        state={'running':True,'prepared':True,'imu_sync':{'state':'synced'}}
+        state={'running':True,'prepared':True,'frame_duration_us':16667,
+               'requested_controls':{'exposure_us':8000,'gain':1.0},
+               'imu_sync':{'state':'synced'}}
         server.workers['camera'].call=AsyncMock(return_value=state)
         server.workers['stream'].call.return_value={'active_streams':[{'backend':'runtime','stream_id':'main'}]}
         assert await server.dispatch(session,'camera.start',{'lease_epoch':1,'with_imu':True})==state
