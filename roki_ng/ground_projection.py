@@ -53,8 +53,8 @@ class GroundProjection:
         mx[~good]=-100;my[~good]=-100
         return cv2.remap(image,mx,my,cv2.INTER_LINEAR)
 
-    def bearing(self, pixel, quaternion):
-        """Horizontal head-reference bearing, without assuming a ground contact."""
+    def _pixel_ray(self, pixel, quaternion):
+        """Calibrated ray in the head reference frame."""
         px,py=map(float,pixel)
         if not (0<=px<800 and 0<=py<650):raise ValueError('Pixel outside capture')
         distance=(self.mx[::4,::4]-2*px)**2+(self.my[::4,::4]-2*py)**2
@@ -69,7 +69,23 @@ class GroundProjection:
         cr,sr,cp,sp=math.cos(roll),math.sin(roll),math.cos(pitch),math.sin(pitch)
         rotation=np.array([[cp,0,sp],[sr*sp,cr,-sr*cp],[-cr*sp,sr,cr*cp]])
         ray=rotation@ray
+        return ray
+
+    def bearing(self,pixel,quaternion):
+        ray=self._pixel_ray(pixel,quaternion)
         return math.atan2(ray[1],ray[0])
+
+    def ground_point(self,pixel,quaternion):
+        ray=self._pixel_ray(pixel,quaternion)
+        if ray[2]>=-.02:raise ValueError('Post foot is above or too close to horizon')
+        return ray[:2]*(float(self.ground[0,0,2])/ray[2])
+
+    def upright_height(self,foot_pixel,top_pixel,quaternion):
+        foot=self.ground_point(foot_pixel,quaternion)
+        ray=self._pixel_ray(top_pixel,quaternion)
+        scale=float(np.dot(foot,ray[:2])/np.dot(ray[:2],ray[:2]))
+        if scale<=0:raise ValueError('Post top behind camera')
+        return float(-self.ground[0,0,2]+scale*ray[2])
 
     def image_points(self, points, quaternion):
         """Project floor points back into the original distorted capture."""

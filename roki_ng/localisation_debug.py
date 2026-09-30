@@ -25,6 +25,6 @@ def video_frame(image,projector,quaternion,lines,circle,posts,result,model,circl
         cv2.rectangle(out,(x,y),(x+w,y+h),colour,3)
         cv2.putText(out,p['colour'],(x,max(18,y-5)),cv2.FONT_HERSHEY_SIMPLEX,.6,colour,2)
     cv2.rectangle(out,(0,0),(800,65),(20,20,20),-1)
-    cv2.putText(out,f"Frame {result['frame_sequence']} | {result.get('fit_state','no fit')} | lines {len(lines)} | goal pairs {result.get('goal_pairs',0)}",(8,24),cv2.FONT_HERSHEY_SIMPLEX,.55,(255,255,255),1)
+    cv2.putText(out,f"Frame {result['frame_sequence']} | {result.get('fit_state','no fit')} | lines {len(lines)} | goals {len(posts)} rejected {result.get('goal_rejected',0)}",(8,24),cv2.FONT_HERSHEY_SIMPLEX,.55,(255,255,255),1)
     cv2.putText(out,str(result.get('reason',''))[:100],(8,49),cv2.FONT_HERSHEY_SIMPLEX,.46,(230,230,230),1)
     return out

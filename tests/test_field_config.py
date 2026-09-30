@@ -75,3 +75,40 @@ def test_operator_colour_threshold_changes_goal_observation(tmp_path):
     assert any(c['colour']=='blue' for c in goal_candidates(image,p.values))
     p.set_many({'vision.blue_posts.l_min':95,'vision.blue_posts.l_max':100})
     assert not goal_candidates(image,p.values)
+
+
+def test_goal_outside_turf_cannot_borrow_green_from_the_side(tmp_path):
+    import cv2
+    import numpy as np
+    from roki_ng.goal_observations import goal_candidates
+    p=Parameters(tmp_path)
+    image=np.full((650,800,3),(100,100,100),np.uint8)
+    image[300:620,200:760]=(40,140,45)
+    # Bottom is outside the turf, but the old 41 px patch overlaps green at right.
+    cv2.rectangle(image,(184,270),(192,410),(200,40,20),-1)
+    assert goal_candidates(image,p.values)==[]
+
+
+def test_true_goal_on_turf_boundary_retains_visible_support(tmp_path):
+    import cv2
+    import numpy as np
+    from roki_ng.goal_observations import goal_candidates
+    p=Parameters(tmp_path)
+    image=np.full((650,800,3),(100,100,100),np.uint8)
+    image[400:640,80:720]=(40,140,45)
+    cv2.rectangle(image,(300,250),(312,400),(200,40,20),-1)
+    assert any(c['colour']=='blue' for c in goal_candidates(image,p.values))
+
+
+def test_post_support_can_cross_white_paint_but_not_background(tmp_path):
+    import cv2
+    import numpy as np
+    from roki_ng.goal_observations import goal_candidates
+    p=Parameters(tmp_path)
+    image=np.full((650,800,3),(100,100,100),np.uint8)
+    image[420:640,80:720]=(40,140,45)
+    image[400:420,80:720]=255
+    cv2.rectangle(image,(300,250),(312,400),(200,40,20),-1)
+    assert any(c['colour']=='blue' for c in goal_candidates(image,p.values))
+    image[401:420,80:720]=100
+    assert not goal_candidates(image,p.values)

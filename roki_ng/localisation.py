@@ -30,6 +30,7 @@ class PoseFilter:
         self.sequence = -1
         self.anchor = None
         self.anchor_time = None
+        self.goal_foot_tolerance = (parameters or {}).get('localisation.goal_foot_tolerance_m',.35)
         self.max_speed = (parameters or {}).get('localisation.max_speed_m_s', .5)
         self.max_turn = (parameters or {}).get('localisation.max_turn_rad_s', 2.)
         from .field_config import line_model, circle_model
@@ -72,7 +73,7 @@ class PoseFilter:
             candidates = np.concatenate((self.particles[:len(self.particles)-n], recovery))
         weights, errors = update(candidates, lines, self.model, circle, self.circles)
         from .goal_observations import bearing_log_likelihood
-        goal_log, goal_pairs = bearing_log_likelihood(candidates, goals or [], self.goals)
+        goal_log, goal_pairs = bearing_log_likelihood(candidates, goals or [], self.goals, self.goal_foot_tolerance)
         if goal_pairs:
             weights *= np.exp(goal_log-goal_log.max())
             weights /= weights.sum()

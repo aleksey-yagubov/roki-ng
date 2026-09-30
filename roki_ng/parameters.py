@@ -26,6 +26,8 @@ SCHEMA = {
     'camera.ae_enabled': ('bool',False,None,None,'next_request','Automatic exposure; manual values retained when enabled'),
     'camera.awb_enabled': ('bool',False,None,None,'next_request','Automatic white balance; manual values retained when enabled'),
     'localisation.camera_height_m': ('float',.4068,.2,.8,'next_localisation','Optical centre height; nominal default, measure for robot posture'),
+    'localisation.goal_foot_tolerance_m': ('float',.35,.05,1.,'next_localisation','Maximum projected post-foot distance from a mapped goal post'),
+    'localisation.goal_height_tolerance_ratio': ('float',.5,.05,1.,'next_localisation','Allowed relative error of calibrated coloured post height'),
     'localisation.max_speed_m_s': ('float',.5,.01,2.,'next_localisation','Maximum plausible translation speed; metres per second'),
     'localisation.max_turn_rad_s': ('float',2.,.05,6.3,'next_localisation','Maximum plausible yaw speed; radians per second'),
     'vision.field_auto': ('bool',True,None,None,'next_frame','Adaptive paint segmentation; false uses saved LAB thresholds'),

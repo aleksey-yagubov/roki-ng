@@ -92,7 +92,7 @@ class Localisation:
             from .dataplane import Channel,FRAME_TOPIC,IMU_TOPIC,FRAME_HEADER,IMU_RECORD,LOCALISATION_TOPIC,FRAME_BYTES
             from .synchronization import SequenceJoiner
             from .field_observations import runtime_paint_mask,detect_circle,observations
-            from .goal_observations import goal_candidates,paired_bearings
+            from .goal_observations import goal_candidates,paired_bearings,mapped_candidates,upright_candidates
             cv2.setNumThreads(1)
             debug_channel=Channel(LOCALISATION_TOPIC,publisher=True)
             channels=[Channel(FRAME_TOPIC),Channel(IMU_TOPIC)]
@@ -140,7 +140,7 @@ class Localisation:
                     self.dropped+=1;continue
                 started=now
                 image=np.frombuffer(data,np.uint8).reshape(650,800,3)
-                posts=[];lines=[];circle=None
+                posts=[];lines=[];circle=None;raw_post_count=0
                 try:
                     parameters=self.parameters;revision=self.parameter_revision
                     white=runtime_paint_mask(image,parameters)
@@ -151,6 +151,8 @@ class Localisation:
                         paint[np.abs(np.hypot(xx-x,yy-y)-r)<8]=0
                     lines=observations(paint,scale=.5)[:32]
                     posts=goal_candidates(image,parameters)
+                    raw_post_count=len(posts)
+                    posts=upright_candidates(posts,projector,imu[2:6],engine.goals,parameters['localisation.goal_height_tolerance_ratio'])
                     bearings=paired_bearings(posts,projector,imu[2:6])
                     result=engine.update(header[0],lines,circle,bearings,timestamp=header[1]/1e9)
                 except ValueError as exc:
@@ -160,6 +162,8 @@ class Localisation:
                 result.pop('proposal_spread',None)
                 result.update(sensor_timestamp_ns=header[1],imu_sequence=imu[0],
                               processing_ms=round((time.monotonic()-started)*1000))
+                posts=mapped_candidates(posts,projector,imu[2:6],result,engine.goals,engine.goal_foot_tolerance)
+                result['goal_rejected']=raw_post_count-len(posts)
                 result['goal_candidates']=posts
                 result['parameter_revision']=revision
                 result['processing_ms']=round((time.monotonic()-started)*1000)

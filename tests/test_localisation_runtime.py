@@ -351,16 +351,16 @@ def test_coloured_goal_pair_breaks_symmetry_but_rejects_teleport():
     g=p['field.goal.1'];ends=np.array([[g['x'],g['y']-.5],[g['x'],g['y']+.5]])-pose[:2]
     angles=(np.arctan2(ends[:,1],ends[:,0])-pose[2]).tolist()
     pf=PoseFilter([0,0,0],parameters=p)
-    result=pf.update(1,lines,circle,[{'colour':'blue','bearings':angles}],timestamp=10.)
+    result=pf.update(1,lines,circle,[{'colour':'blue','bearings':angles,'ground_feet':(ends@rot).tolist()}],timestamp=10.)
     assert result['fit_state']=='matched'
     assert np.linalg.norm(np.asarray(result['candidate'])[:2]-pose[:2])<.15
     assert result['goal_pairs']==1 and not result['valid']
     before=pf.particles.copy();anchor=pf.anchor.copy()
-    result=pf.update(2,lines,circle,[{'colour':'yellow','bearings':angles}],timestamp=10.1)
+    result=pf.update(2,lines,circle,[{'colour':'yellow','bearings':angles,'ground_feet':(ends@rot).tolist()}],timestamp=10.1)
     assert result['reason']=='motion_discontinuity'
     assert result['candidate'] is None
     assert np.array_equal(pf.particles,before) and np.array_equal(pf.anchor,anchor)
-    later=pf.update(3,lines,circle,[{'colour':'yellow','bearings':angles}],timestamp=20.)
+    later=pf.update(3,lines,circle,[{'colour':'yellow','bearings':angles,'ground_feet':(ends@rot).tolist()}],timestamp=20.)
     assert later['fit_state']=='matched'  # Enough elapsed time for traversal.
     assert later['candidate'] is not None
 
@@ -369,9 +369,71 @@ def test_goal_pair_rejects_single_fragment_and_duplicate_colours():
     from roki_ng.goal_observations import paired_bearings,bearing_log_likelihood
     class Projector:
         def bearing(self,p,q):return p[0]/500
+        def ground_point(self,p,q):return np.array(p)/100
     one={'colour':'blue','rect':[20,20,10,50],'foot_px':[25,70]}
     assert paired_bearings([one],Projector(),[])==[]
     assert paired_bearings([one,one|{'foot_px':[30,70]}],Projector(),[])==[]
     goals=[{'colour':'blue','x':-1,'y':0,'width':1},{'colour':'blue','x':1,'y':0,'width':1}]
     score,used=bearing_log_likelihood(np.array([[0,0,0.]]),[{'colour':'blue','bearings':[-.2,.2]}],goals)
     assert used==0 and score[0]==0
+
+
+def test_matching_goal_bearings_without_field_contact_do_not_reweight_pose():
+    from roki_ng.goal_observations import bearing_log_likelihood
+    particles=np.array([[0.,0.,0.],[0.,0.,np.pi]])
+    goals=[{'colour':'blue','x':1.675,'y':0.,'width':1.}]
+    feet=np.array([[1.675,-.5],[1.675,.5]])
+    angles=np.arctan2(feet[:,1],feet[:,0]).tolist()
+    # Same directions, but the coloured objects are far behind the end line.
+    score,used=bearing_log_likelihood(particles,[{'colour':'blue','bearings':angles,'ground_feet':(feet*3).tolist()}],goals)
+    assert used==0 and np.array_equal(score,[0.,0.])
+    score,used=bearing_log_likelihood(particles,[{'colour':'blue','bearings':angles,'ground_feet':feet.tolist()}],goals)
+    assert used==1 and score[0]>score[1]
+
+
+def test_post_ground_intersection_rejects_horizon():
+    from roki_ng.ground_projection import GroundProjection
+    g=GroundProjection.__new__(GroundProjection)
+    g.ground=np.array([[[0.,0.,-.4]]])
+    g._pixel_ray=lambda *a:np.array([1.,0.,.1])
+    with pytest.raises(ValueError,match='horizon'):g.ground_point([400,300],[0,0,0,1])
+    g._pixel_ray=lambda *a:np.array([1.,.5,-.2])
+    assert np.allclose(g.ground_point([400,300],[0,0,0,1]),[2.,1.])
+
+
+def test_map_gate_rejects_background_and_unmatched_pose():
+    from roki_ng.goal_observations import mapped_candidates
+    class Projector:
+        def ground_point(self,pixel,q):return np.asarray(pixel,float)
+    goals=[{'colour':'blue','x':1.675,'y':0.,'width':1.}]
+    posts=[{'colour':'blue','foot_px':[1.675,.5]},
+           {'colour':'blue','foot_px':[2.4,.5]},
+           {'colour':'yellow','foot_px':[1.675,-.5]}]
+    matched={'fit_state':'matched','candidate':[0.,0.,0.]}
+    assert mapped_candidates(posts,Projector(),[],matched,goals,.35)==posts[:1]
+    for state in ('weak','ambiguous','rejected'):
+        assert mapped_candidates(posts,Projector(),[],dict(matched,fit_state=state),goals,.35)==[]
+    # Frame and world axes can differ: rotate a real observation back to the goal.
+    turned=[dict(posts[0],foot_px=[.5,-1.675])]
+    assert mapped_candidates(turned,Projector(),[],dict(matched,candidate=[0.,0.,np.pi/2]),goals,.35)==turned
+
+
+def test_alternative_pairs_of_same_goal_are_not_extra_evidence():
+    from roki_ng.goal_observations import bearing_log_likelihood
+    particles=np.array([[0.,0.,0.],[0.,0.,np.pi]])
+    feet=np.array([[1.675,-.5],[1.675,.5]])
+    pair={'colour':'blue','bearings':np.arctan2(feet[:,1],feet[:,0]),'ground_feet':feet}
+    goals=[{'colour':'blue','x':1.675,'y':0.,'width':1.}]
+    once,count=bearing_log_likelihood(particles,[pair],goals)
+    twice,count2=bearing_log_likelihood(particles,[pair,pair],goals)
+    np.testing.assert_allclose(once,twice)
+    assert count==count2==1
+
+
+def test_upright_height_filter_rejects_near_ground_colour_fragments():
+    from roki_ng.goal_observations import upright_candidates
+    class Projector:
+        def upright_height(self,foot,top,q):return foot[0]
+    goals=[{'colour':'yellow','height':.6}]
+    posts=[{'colour':'yellow','rect':[10,10,10,30],'foot_px':[h,0]} for h in (.55,.05,1.3)]
+    assert upright_candidates(posts,Projector(),[],goals,.5)==posts[:1]
