@@ -6,7 +6,7 @@ import time
 
 import msgpack
 
-UDP_LIMIT = 1200
+UDP_LIMIT = 1400  # Entire UDP payload, including the MessagePack envelope.
 IPC_LIMIT = 65536
 
 

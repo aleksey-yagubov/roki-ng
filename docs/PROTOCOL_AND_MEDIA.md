@@ -23,7 +23,8 @@ control port, настроенный на обеих сторонах; нача�
 ## Конверт datagram
 
 Рабочий datagram должен укладываться в безопасный лимит UDP payload, изначально
-1200 байт. Это исключает IP fragmentation в обычных Ethernet/Wi-Fi сетях.
+1400 байт, включая конверт MessagePack, без UDP/IP. При MTU пути 1500 байт
+фрагментация не требуется; меньший MTU пути всё ещё может препятствовать отправке.
 
 ```text
 {
@@ -52,7 +53,7 @@ IPv4 используется `IP_MTU_DISCOVER=IP_PMTUDISC_DO`, для IPv6 —
 
 Превышение path MTU должно завершать отправку с `EMSGSIZE` и увеличивать
 диагностический counter. Реализация не включает fragmentation в качестве
-fallback. MessagePack producer проверяет предел 1200 байт до `send`.
+fallback. MessagePack producer проверяет предел 1400 байт до `send`.
 
 Начальный RTP packet MTU для прямого Ethernet/Wi-Fi равен 1400 байт и включает
 RTP header и header extensions, но не внешние UDP/IP headers. Значение является
@@ -195,7 +196,7 @@ Log sample передаётся MessagePack batch-ами через основн
 
 `log.update` и `log.unsubscribe` меняют фильтр или прекращают live-передачу;
 `log.snapshot` возвращает bounded последние записи без постоянной подписки.
-Batch всегда укладывается в MessagePack datagram budget 1200 байт. Длинные
+Batch всегда укладывается в MessagePack datagram budget 1400 байт. Длинные
 строки заранее ограничиваются, а многострочные traceback передаются
 последовательностью records.
 

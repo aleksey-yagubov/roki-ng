@@ -225,27 +225,42 @@ def test_segmentation_keeps_original_pixel_edges():
     assert mask[326,381] and not mask[250,500]
 
 
-def test_bounded_status_with_four_goals_fits_udp():
+def test_bounded_status_with_four_goals_fits_udp(tmp_path):
     import time
+    from types import SimpleNamespace
+    from roki_ng.supervisor import Supervisor
     from roki_ng.localisation_worker import Localisation
     from roki_ng.localisation import PoseFilter
     from roki_ng.field_observations import field_model
     from roki_ng.field_config import GEOMETRY
-    from roki_ng.wire import envelope,pack
+    from roki_ng.wire import UDP_LIMIT, unpack
     worker=Localisation({'state_dir':'/tmp'},lambda *a:None,lambda *a:None)
     result=PoseFilter([0,0,0]).update(1,field_model(),None)
     result.pop('proposal_spread',None)
     result.update(sensor_timestamp_ns=2**60,frame_sequence=2**32-1,imu_sequence=2**32-1,
-                  processing_ms=99999,parameter_revision=99999,
+                  processing_ms=99999,parameter_revision=2**32-1,goal_rejected=16,
                   goal_candidates=[{'colour':'yellow','rect':[700,500,100,150],
                                     'foot_px':[799.,649.],'metric_valid':False}]*4)
     worker.result=result;worker.last_measurement=time.monotonic()
     worker.geometry=GEOMETRY;worker.configuration_id='f'*16;worker.capture_id='f'*32
     worker.frames=worker.dropped=2**32-1
-    data={'topic':'localisation.state','valid':False,'source_mono_ns':2**60,
-          'age_ms':99999,'data':worker.state()}
-    packet=pack(envelope('sample','data.sample',data,session=2**63,token=2**63,sequence=2**32-1))
-    assert len(packet)<=1200
+    server=Supervisor({'state_dir':str(tmp_path)})
+    server.workers={'localisation':SimpleNamespace(
+        state=worker.state() | {'logs_dropped':2**32-1},
+        last_heartbeat=time.monotonic(),alive=True)}
+    sent=[]
+    server._send_raw=lambda data,address:sent.append(data)
+    session=SimpleNamespace(closed=False,id=2**64-1,token=2**64-1,
+                            sequence=2**32-1,address=('127.0.0.1',8094))
+    sample=server._sample('localisation.state')
+    sample.update(subscription='localisation.state',sequence=2**32-1)
+    packet=server.send(session,'sample','data.sample',sample)
+    assert packet is not None and len(packet)<=UDP_LIMIT
+    assert unpack(packet)['body']['data']['result']['goal_candidates']==result['goal_candidates']
+    packet=server.send(session,'response','localisation.status',{'result':worker.state()},ident=2**32-1)
+    assert packet is not None and len(packet)<=UDP_LIMIT
+    assert 'error' not in unpack(packet)['body']
+    assert server.counters['oversize']==0 and len(sent)==2
 
 
 def test_circle_refinement_rejects_filled_disc():

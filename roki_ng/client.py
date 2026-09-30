@@ -6,7 +6,7 @@ import ipaddress
 import json
 import uuid
 
-from .wire import Fault, envelope, pack, unpack, udp_socket
+from .wire import Fault, UDP_LIMIT, envelope, pack, unpack, udp_socket
 
 
 class Client:
@@ -31,7 +31,7 @@ class Client:
 
     async def _read(self):
         while True:
-            raw, address = await asyncio.get_running_loop().sock_recvfrom(self.sock, 1201)
+            raw, address = await asyncio.get_running_loop().sock_recvfrom(self.sock, UDP_LIMIT + 1)
             if address != self.address:
                 continue
             try:
