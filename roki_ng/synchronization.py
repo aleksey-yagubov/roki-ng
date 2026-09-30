@@ -85,7 +85,7 @@ class SequenceJoiner:
         if self.offset is None:
             return None
         key = sequence + self.offset
-        if not 0 <= key <= 65535:
+        if not 0 <= key <= 0xffffffff:
             return None
         if key in self.imu:
             return value, self.imu.pop(key)

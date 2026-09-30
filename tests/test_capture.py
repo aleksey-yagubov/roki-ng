@@ -221,3 +221,46 @@ def test_worker_death_stops_related_capture(tmp_path, role):
         assert calls == ["camera.stop", "imu.stop"]
         assert server.capture_session is None
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('reverse',[False,True])
+def test_join_extended_counters_never_alias_previous_epoch(reverse):
+    join=SequenceJoiner(offset=-4)
+    join.measurement(3,'old')
+    if reverse:
+        assert join.measurement(65539,'new') is None
+        assert join.frame(65543,'frame')==('frame','new')
+    else:
+        assert join.frame(65543,'frame') is None
+        assert join.measurement(65539,'new')==('frame','new')
+
+
+def test_imu_rollover_and_late_previous_epoch(monkeypatch):
+    monkeypatch.setattr('roki_ng.imu.Channel',FakeChannel)
+    frame=NS(Orientation=NS(X=0,Y=0,Z=0,W=1),Timestamp=NS(TimeS=1,TimeNS=0),SensorID=37)
+    records=[dict(sequence=n,flags=1,mode=1,imu=frame) for n in (65534,0,65535,1,0,2)]
+    mb=NS(IsConnected=lambda:True,GetStreamDrops=lambda:0,ReadIMUStream=lambda **kw:records)
+    imu=ImuPublisher(NS(mb=mb));imu.tick()
+    assert [r[0] for r in imu.channel.records]==[65534,65536,65535,65537,65538]
+    assert imu.highest==65538
+
+
+def test_imu_counter_reset_is_not_rollover(monkeypatch):
+    monkeypatch.setattr('roki_ng.imu.Channel',FakeChannel)
+    mb=NS(IsConnected=lambda:True,GetStreamDrops=lambda:0,ReadIMUStream=lambda **kw:[dict(sequence=0)])
+    imu=ImuPublisher(NS(mb=mb));imu.highest=10000
+    with pytest.raises(Fault,match='discontinuity'):imu.tick()
+
+
+def test_imu_continues_across_two_full_counter_periods(monkeypatch):
+    monkeypatch.setattr('roki_ng.imu.Channel',FakeChannel)
+    frame=NS(Orientation=NS(X=0,Y=0,Z=0,W=1),Timestamp=NS(TimeS=1,TimeNS=0),SensorID=37)
+    batch=[]
+    mb=NS(IsConnected=lambda:True,GetStreamDrops=lambda:0,ReadIMUStream=lambda **kw:batch)
+    imu=ImuPublisher(NS(mb=mb))
+    for start in range(0,131200,128):
+        batch[:]=[dict(sequence=n%65536,flags=1,mode=1,imu=frame) for n in range(start,start+128)]
+        imu.tick()
+    assert imu.published==131200
+    assert imu.channel.records[-1][0]==131199
+    assert len(imu.seen)<=512

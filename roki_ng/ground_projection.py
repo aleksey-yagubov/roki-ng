@@ -28,6 +28,7 @@ class GroundProjection:
         if m1.shape!=(1300,1600,2) or m1.dtype!=np.int16 or m2.shape!=(1300,1600) or m2.dtype!=np.uint16:
             raise ValueError('Incompatible legacy remap tables')
         self.mx,self.my = cv2.convertMaps(m1,m2,cv2.CV_32FC1)
+        self._ray_cache = {}
         row,col=np.indices((720,720),dtype=np.float32)
         self.ground=np.stack((4-(row+.5)/180,2-(col+.5)/180,np.full_like(row,-height)),axis=-1)
 
@@ -57,6 +58,19 @@ class GroundProjection:
         """Calibrated ray in the head reference frame."""
         px,py=map(float,pixel)
         if not (0<=px<800 and 0<=py<650):raise ValueError('Pixel outside capture')
+        key=(px,py)
+        ray=self._ray_cache.get(key)
+        if ray is None:
+            ray=self._calibrated_ray(px,py)
+            if len(self._ray_cache)>=512:self._ray_cache.clear()
+            self._ray_cache[key]=ray
+        pitch,roll=head_angles(quaternion)
+        cr,sr,cp,sp=math.cos(roll),math.sin(roll),math.cos(pitch),math.sin(pitch)
+        rotation=np.array([[cp,0,sp],[sr*sp,cr,-sr*cp],[-cr*sp,sr,cr*cp]])
+        ray=rotation@ray
+        return ray
+
+    def _calibrated_ray(self,px,py):
         distance=(self.mx[::4,::4]-2*px)**2+(self.my[::4,::4]-2*py)**2
         row,col=np.unravel_index(np.argmin(distance),distance.shape)
         y0,x0=max(0,row*4-5),max(0,col*4-5)
@@ -65,10 +79,6 @@ class GroundProjection:
         if local[dy,dx]>36:raise ValueError('Pixel outside calibrated view')
         u,v=x0+dx,y0+dy
         ray=np.array([1.,(self.P[0,2]-u)/self.P[0,0],(self.P[1,2]-v)/self.P[1,1]])
-        pitch,roll=head_angles(quaternion)
-        cr,sr,cp,sp=math.cos(roll),math.sin(roll),math.cos(pitch),math.sin(pitch)
-        rotation=np.array([[cp,0,sp],[sr*sp,cr,-sr*cp],[-cr*sp,sr,cr*cp]])
-        ray=rotation@ray
         return ray
 
     def bearing(self,pixel,quaternion):

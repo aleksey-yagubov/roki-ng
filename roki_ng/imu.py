@@ -47,12 +47,15 @@ class ImuPublisher:
             raise Fault("hardware_error", "Motherboard ACM disconnected")
         edges = []
         for record in mb.ReadIMUStream(timeout_ms=0, limit=128):
-            seq = record["sequence"]
+            raw = record["sequence"]
+            # Extend the STM uint16 counter within this capture. Late samples at
+            # the mode boundary or rollover belong to the nearest counter epoch.
+            seq = raw if self.highest < 0 else self.highest + ((raw-self.highest+32768) % 65536)-32768
+            if seq < 0 or (self.highest >= 0 and seq < self.highest-256):
+                raise Fault("imu_sequence", "STM counter discontinuity; restart capture")
             # Records can complete out of order at the mode-switch boundary.
             if seq in self.seen:
                 continue
-            if self.highest > 65000 and seq < 100:
-                raise Fault("imu_counter_limit", "Restart capture before STM counter wraps")
             self.highest = max(self.highest, seq)
             self.seen.add(seq)
             if len(self.seen) > 512:
@@ -60,6 +63,7 @@ class ImuPublisher:
             if self.alignment and record["mode"] == 2:
                 edges.append({key: record[key] for key in
                               ("sequence", "flags", "rise_us", "fall_us")})
+                edges[-1]["sequence"] = seq
             if not record["flags"] & 1:
                 self.lost += 1
                 continue
