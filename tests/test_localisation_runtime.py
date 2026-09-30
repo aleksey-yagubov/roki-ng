@@ -437,3 +437,15 @@ def test_upright_height_filter_rejects_near_ground_colour_fragments():
     goals=[{'colour':'yellow','height':.6}]
     posts=[{'colour':'yellow','rect':[10,10,10,30],'foot_px':[h,0]} for h in (.55,.05,1.3)]
     assert upright_candidates(posts,Projector(),[],goals,.5)==posts[:1]
+
+
+def test_adaptive_paint_excludes_carpet_outer_edge_but_keeps_inner_boundary():
+    import cv2
+    from roki_ng.field_observations import runtime_paint_mask
+    image=np.full((650,800,3),230,np.uint8)
+    image[100:600,60:740]=(40,140,45)
+    cv2.rectangle(image,(90,130),(710,570),(245,245,245),6)
+    cv2.line(image,(90,350),(710,350),(245,245,245),6)
+    mask=runtime_paint_mask(image)
+    assert mask[130,300]>0 and mask[350,300]>0
+    assert not mask[96:100,200:600].any()

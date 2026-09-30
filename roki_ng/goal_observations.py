@@ -54,7 +54,7 @@ def goal_candidates(image,parameters=None):
             candidates.append((pixels,{'colour':colour,'foot_px':[foot_x,foot_y],
                                       'rect':[x,y,w,h],'metric_valid':False}))
         candidates.sort(key=lambda item:item[0],reverse=True)
-        results.extend(item[1] for item in candidates[:6])
+        results.extend(item[1] for item in candidates[:24])
     return results
 
 
@@ -69,7 +69,7 @@ def upright_candidates(candidates,projector,quaternion,goals,tolerance):
         except ValueError:continue
         expected=matches[0]['height']
         if abs(height-expected)<=expected*tolerance:accepted.append(post)
-    return accepted
+    return [p for colour in ('blue','yellow') for p in [p for p in accepted if p['colour']==colour][:6]]
 
 
 def paired_bearings(candidates,projector,quaternion):

@@ -29,6 +29,8 @@ class GroundProjection:
             raise ValueError('Incompatible legacy remap tables')
         self.mx,self.my = cv2.convertMaps(m1,m2,cv2.CV_32FC1)
         self._ray_cache = {}
+        self._coarse_mx=self.mx[::4,::4].copy()
+        self._coarse_my=self.my[::4,::4].copy()
         row,col=np.indices((720,720),dtype=np.float32)
         self.ground=np.stack((4-(row+.5)/180,2-(col+.5)/180,np.full_like(row,-height)),axis=-1)
 
@@ -71,7 +73,7 @@ class GroundProjection:
         return ray
 
     def _calibrated_ray(self,px,py):
-        distance=(self.mx[::4,::4]-2*px)**2+(self.my[::4,::4]-2*py)**2
+        distance=(self._coarse_mx-2*px)**2+(self._coarse_my-2*py)**2
         row,col=np.unravel_index(np.argmin(distance),distance.shape)
         y0,x0=max(0,row*4-5),max(0,col*4-5)
         local=(self.mx[y0:row*4+6,x0:col*4+6]-2*px)**2+(self.my[y0:row*4+6,x0:col*4+6]-2*py)**2

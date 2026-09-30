@@ -112,3 +112,18 @@ def test_post_support_can_cross_white_paint_but_not_background(tmp_path):
     assert any(c['colour']=='blue' for c in goal_candidates(image,p.values))
     image[401:420,80:720]=100
     assert not goal_candidates(image,p.values)
+
+
+def test_thin_distant_posts_survive_large_ground_colour_fragments(tmp_path):
+    import cv2
+    import numpy as np
+    from roki_ng.goal_observations import goal_candidates,upright_candidates
+    p=Parameters(tmp_path)
+    image=np.full((650,800,3),(40,140,45),np.uint8)
+    for i in range(12):cv2.rectangle(image,(30+i*55,300),(45+i*55,345),(0,220,230),-1)
+    cv2.rectangle(image,(300,100),(305,160),(0,220,230),-1)
+    cv2.rectangle(image,(440,100),(445,160),(0,220,230),-1)
+    class Projector:
+        def upright_height(self,foot,top,q):return .6 if top[1]==100 else .05
+    posts=upright_candidates(goal_candidates(image,p.values),Projector(),[],[{'colour':'yellow','height':.6}],.5)
+    assert len(posts)==2 and all(r['rect'][1]==100 for r in posts)

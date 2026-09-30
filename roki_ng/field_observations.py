@@ -16,6 +16,7 @@ def runtime_paint_mask(image, parameters=None):
         if not contours:raise ValueError('No turf in configured LAB range')
         roi=np.zeros(green.shape,np.uint8)
         cv2.fillConvexPoly(roi,cv2.convexHull(max(contours,key=cv2.contourArea)),255)
+        roi=cv2.erode(roi,np.ones((5,5),np.uint8))
         full_lab=cv2.cvtColor(image,cv2.COLOR_BGR2LAB)
         white=mask(full_lab,parameters,'white_marking')
     else:
@@ -29,7 +30,7 @@ def runtime_paint_mask(image, parameters=None):
 
 def clusters(values, count):
     cv2.setRNGSeed(17)
-    sample=np.ascontiguousarray(values[::max(1,len(values)//30000)],np.float32)
+    sample=np.ascontiguousarray(values[::max(1,(len(values)+5999)//6000)],np.float32)
     _,_,centres=cv2.kmeans(sample,count,None,(cv2.TERM_CRITERIA_EPS+cv2.TERM_CRITERIA_MAX_ITER,60,.1),3,cv2.KMEANS_PP_CENTERS)
     return centres
 
@@ -71,7 +72,7 @@ def segment(image,parameters=None):
     contour,_=cv2.findContours(largest(joined),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
     roi=np.zeros((h,w),np.uint8)
     cv2.fillConvexPoly(roi,cv2.convexHull(max(contour,key=cv2.contourArea)),255)
-    roi=cv2.dilate(roi,np.ones((11,11),np.uint8))
+    roi=cv2.erode(roi,np.ones((5,5),np.uint8))
     local=clusters(lab[roi!=0],3)
     # Paint is the bright, near-neutral cluster; a green cluster is never white.
     white_id=min(range(3),key=lambda i:float(np.linalg.norm(local[i,1:]-128)-local[i,0]*.25))
