@@ -43,10 +43,15 @@ def test_particle_count_and_prior_are_bounded():
 
 def test_quaternion_projection_matches_reference_without_scipy():
     from roki_ng.ground_projection import head_angles
-    from tools.bird_view_probe import head_angles as reference
-    for q in ([.8980102539,-.1106567383,-.047668457,.4230957031],
-              [.70947265625,-.05584716797,-.040649414,.70129394531]):
-        assert np.allclose(head_angles(q),reference(q),atol=1e-8)
+    # Independent SciPy Rotation reference values, computed on the workstation.
+    # Keep this regression runnable on Buildroot without desktop tools or SciPy.
+    for q, expected in (
+        ([.8980102539,-.1106567383,-.047668457,.4230957031],
+         (0.6911682142181879, 0.008023745243401548)),
+        ([.70947265625,-.05584716797,-.040649414,.70129394531],
+         (0.013008758267155862, 0.020654057744836196)),
+    ):
+        assert np.allclose(head_angles(q), expected, atol=1e-8, rtol=0)
     with pytest.raises(ValueError):head_angles([0,0,0,0])
 
 
