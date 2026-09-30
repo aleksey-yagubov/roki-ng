@@ -15,6 +15,8 @@ from .wire import Fault, boolean, choice, number, page
 from .calibration import TestPlan, TITLES, MEASUREMENTS, describe
 from .calibration import quaternion_yaw, wrap
 from .motion import slots
+from .body_imu import BodyImu
+from .stabilization import CrouchStabilizer
 
 ASSETS = Path(__file__).with_name("assets")
 
@@ -104,7 +106,6 @@ class RokiHardware:
             raise Fault("imu_invalid", "Body IMU response must contain 8 bytes")
         return tuple(value / 16384 for value in struct.unpack("<hhhh", bytes(raw)))
 
-
 class SimHardware:
     def check_queue(self):
         pass
@@ -161,8 +162,18 @@ class Body:
         self.probe_successes = 0
         self.recovery_active = False
         self.model = Robot()
+        self.hip_limits = {(servo, bus): sorted((7500 + low * sign, 7500 + high * sign))
+                           for servo, bus, sign, _, low, high, *_ in self.model.ACTIVESERVOS
+                           if servo == 7}
         self.engine = None
         self.servo_targets = {}
+        self.sent_targets = {}
+        self.body_imu = BodyImu()
+        self.stabilizer = CrouchStabilizer()
+        self.telemetry_watch = False
+        self.telemetry_at = 0
+        self.stabilization_warning = None
+        self.stabilization_log_at = 0
         self.pose = "unknown"
         self.control = False
         self.error = None
@@ -210,6 +221,18 @@ class Body:
             raise
 
     def _command(self, op, args):
+        if op == "body.telemetry.watch":
+            self.telemetry_watch = boolean(args, "enabled", False)
+            self.telemetry_at = 0
+            return {}
+        if op == "body.telemetry.read":
+            if self.body_connected:
+                try:
+                    self.read_body_quaternion(max_age=0.02)
+                except Fault as exc:
+                    if exc.code not in ("body_busy", "imu_invalid"):
+                        raise
+            return self._body_telemetry()
         if op == "control.takeover":
             self.control = False
             self.command("motion.stop_hard", {})
@@ -304,6 +327,8 @@ class Body:
             self.pose = "unknown"
             self.engine = None
             self.servo_targets.clear()
+            self.sent_targets.clear()
+            self.stabilizer.reset("hard_stop")
             try:
                 self.hardware.reset()
             except Exception as exc:
@@ -342,8 +367,11 @@ class Body:
             tilt = number(args, "tilt", self.head["tilt"], -2600, 950, True)
             frames = number(args, "frames", 10, 1, 100, True)
             self.hardware.prepare_motion()
-            self.hardware.head([SimpleNamespace(Id=0, Sio=1, Data=7500 + pan),
-                                SimpleNamespace(Id=12, Sio=2, Data=7500 + tilt)], frames)
+            values = [SimpleNamespace(Id=0, Sio=1, Data=7500 + pan),
+                      SimpleNamespace(Id=12, Sio=2, Data=7500 + tilt)]
+            self.hardware.head(values, frames)
+            self.servo_targets.update(((v.Id, v.Sio), v.Data) for v in values)
+            self.sent_targets.update(((v.Id, v.Sio), v.Data) for v in values)
             self.head = {"pan": pan, "tilt": tilt}
             return {"accepted": True, "target": dict(self.head)}
         if op == "motion.drive":
@@ -481,9 +509,16 @@ class Body:
                 self._link_lost(exc)
                 return
         if not self.body_connected:
+            self._publish_body_telemetry()
+            return
+        self._tick_body_imu()
+        if not self.body_connected:
             return
         if not self.plan:
+            self._tick_stabilization()
+            self._publish_body_telemetry()
             return
+        self.stabilizer.freeze("motion")
         try:
             self.hardware.check_queue()
             if time.monotonic() < self.next_at:
@@ -504,8 +539,7 @@ class Body:
                     raise Fault("invalid_motion", "Invalid servo frame")
                 if any(not 0 <= v.Data <= 16383 for v in values):
                     raise Fault("invalid_motion", "Servo position outside protocol range")
-                self.hardware.send(values, frames, pause)
-                self.servo_targets.update(((v.Id, v.Sio), v.Data) for v in values)
+                self._send_targets(values, frames, pause)
                 self.next_at = time.monotonic() + self.hardware.frame_s * (pause + 1)
             elif kind == "sleep":
                 self.next_at = time.monotonic() + max(0, args[0])
@@ -519,6 +553,8 @@ class Body:
             self.pose = "unknown"
             self.engine = None
             self.servo_targets.clear()
+            self.sent_targets.clear()
+            self.stabilizer.reset("motion_fault")
             self.error = str(exc)
             try:
                 self.hardware.reset()
@@ -526,6 +562,117 @@ class Body:
                 self.error += f"; reset failed: {reset_error}"
             self.log("ERROR", self.error)
             self._finish("failed", self.error)
+        finally:
+            self._publish_body_telemetry()
+
+    def read_body_quaternion(self, max_age=0.0):
+        return self.body_imu.read(self.hardware, max_age=max_age)
+
+    def _body_telemetry(self):
+        now = time.monotonic()
+        return {"body.imu": self.body_imu.state(now),
+                "body.stabilization": self.stabilizer.state(self.parameters) | {
+                    "source_mono_ns": int(now * 1e9), "valid": self.body_connected}}
+
+    def _publish_body_telemetry(self):
+        now = time.monotonic()
+        warning = self.stabilizer.reason if self.stabilizer.reason in (
+            "imu_stale", "tilt_outside_range", "joint_limit") else (
+                "saturated" if self.stabilizer.saturated and self.stabilizer.reason == "regulating" else None)
+        if (self.parameters["stabilization.enabled"] and warning
+                and warning != self.stabilization_warning and now >= self.stabilization_log_at):
+            self.log("WARNING", f"Crouch stabilization: {warning}; "
+                     f"correction={self.stabilizer.offset_deg:.3f} deg")
+            self.stabilization_log_at = now + 1
+        self.stabilization_warning = warning
+        if self.telemetry_watch and now >= self.telemetry_at:
+            self.telemetry_at = now + 0.1
+            self.emit("body.telemetry", self._body_telemetry())
+
+    def _tick_body_imu(self):
+        if not (self.telemetry_watch or self.parameters["body_imu.poll_enabled"]
+                or self.parameters["stabilization.enabled"]):
+            return
+        now = time.monotonic()
+        # Servo deadlines take precedence. No backlog of missed polling periods.
+        if now < self.body_imu.next_at or (self.plan and now >= self.next_at):
+            return
+        try:
+            self.read_body_quaternion()
+        except Fault as exc:
+            if exc.code == "imu_invalid":
+                if self.body_imu.invalid == 1 or self.body_imu.invalid % 50 == 0:
+                    self.log("WARNING", f"Body IMU rejected: {exc}")
+            elif exc.code != "body_busy":
+                self._link_lost(exc)
+        except OSError as exc:
+            self._link_lost(exc)
+
+    def _send_targets(self, values, frames, pause):
+        offsets = self.stabilizer.ticks(self.stabilizer.offset_deg)
+        corrected = [SimpleNamespace(Id=v.Id, Sio=v.Sio,
+                     Data=v.Data + offsets.get((v.Id, v.Sio), 0)) for v in values]
+        if any(not 0 <= v.Data <= 16383 for v in corrected):
+            raise Fault("invalid_motion", "Corrected servo position outside protocol range")
+        for value in corrected:
+            key = value.Id, value.Sio
+            if offsets.get(key, 0):
+                low, high = self.hip_limits[key]
+                if not low <= value.Data <= high:
+                    raise Fault("invalid_motion", "Frozen stabilization correction exceeds hip limit")
+        self.hardware.send(corrected, frames, pause)
+        # Relative trajectories start from nominal targets, never corrected ones.
+        self.servo_targets.update(((v.Id, v.Sio), v.Data) for v in values)
+        self.sent_targets.update(((v.Id, v.Sio), v.Data) for v in corrected)
+
+    def _release_stabilization(self):
+        # An absolute trajectory owns its next interpolated target. Do not send a
+        # separate zero-correction pose before it. No physical motion happens here.
+        self.servo_targets.update(self.sent_targets)
+        self.stabilizer.reset("absolute_motion")
+
+    def _tick_stabilization(self):
+        regulator = self.stabilizer
+        if not self.parameters["stabilization.enabled"]:
+            regulator.freeze("disabled")
+            return
+        if self.pose not in ("crouch", "crouch_centered") or self.error:
+            regulator.freeze("pose_not_supported")
+            return
+        hips = ((7, 1), (7, 2))
+        if any(key not in self.servo_targets for key in hips):
+            regulator.freeze("missing_targets")
+            return
+        try:
+            if not self.hardware.drained():
+                regulator.freeze("queue_busy")
+                return
+            proposed = regulator.propose(self.body_imu, self.parameters, time.monotonic())
+            if proposed is None:
+                return
+            offsets = regulator.ticks(proposed)
+            # Respect the model's hip bounds as well as the wire range. The model
+            # stores angles before FACTOR, so convert its limits to wire targets.
+            targets = []
+            for servo, bus in hips:
+                data = self.servo_targets[servo, bus] + offsets[servo, bus]
+                lo, hi = self.hip_limits[servo, bus]
+                if not max(0, lo) <= data <= min(16383, hi):
+                    regulator.freeze("joint_limit")
+                    return
+                targets.append(SimpleNamespace(Id=servo, Sio=bus, Data=data))
+            if offsets == regulator.ticks(regulator.offset_deg):
+                regulator.offset_deg = proposed  # Accumulate only sub-tick slew.
+                return
+            frames = max(1, math.ceil(BodyImu.PERIOD_S / self.hardware.frame_s))
+            self.hardware.send(targets, frames, frames - 1)
+            self.sent_targets.update(((v.Id, v.Sio), v.Data) for v in targets)
+            regulator.commit(proposed)
+        except (Fault, OSError) as exc:
+            if isinstance(exc, Fault) and exc.code == "body_busy":
+                regulator.freeze("queue_busy")
+            else:
+                self._link_lost(exc)
 
     def _link_lost(self, exc):
         changed = self.body_connected or self.error is None
@@ -535,6 +682,9 @@ class Body:
         self.drive = None
         self.engine = None
         self.servo_targets.clear()
+        self.sent_targets.clear()
+        self.body_imu.invalidate(str(exc)[:240])
+        self.stabilizer.reset("link_lost")
         self.error = str(exc)[:240]
         self._finish("failed", self.error)
         try:
@@ -563,6 +713,8 @@ class Body:
         if name == "stand" and self.pose == "unknown":
             yield from self._pose("base_stand")
             return
+        if name == "stand":
+            self._release_stabilization()
         if name == "crouch_centered" or (name == "crouch" and self.pose in (
                 "crouch_centered", "splits_small", "splits_big")):
             yield from self._static_crouch(name == "crouch_centered")
@@ -621,7 +773,7 @@ class Body:
             right_first = drive["y"] < 0
             rotation = drive["yaw"] * self.parameters["walk.max_yaw_rad"] * drive["speed"]
             if drive.get("heading_hold", False) and abs(drive["yaw"]) <= 0.05:
-                measured = quaternion_yaw(self.hardware.body_quaternion())
+                measured = quaternion_yaw(self.read_body_quaternion())
                 if heading is None:
                     heading = measured
                 limit = self.parameters["walk.heading_max_correction_rad"]
@@ -682,6 +834,7 @@ class Body:
         yield from self._relative_jump(self._relative_jump_steps(direction, fraction))
 
     def _individual_slot(self, steps):
+        self._release_stabilization()
         self.pose, self.engine = "unknown", None
         yield from steps
         yield "drain",
@@ -740,6 +893,7 @@ class Body:
             self.recovery_active = False
 
     def _kick(self, leg, power, offset):
+        self._release_stabilization()
         self.engine = None
         self.pose = "unknown"
         if self.simulated:
@@ -765,6 +919,7 @@ class Body:
 
     def _slot(self, rows, factor=1, *, legs_only=False):
         self._validate_rows(rows, factor)
+        self._release_stabilization()
         self.pose = "unknown"
         self.engine = None
         for row in rows:

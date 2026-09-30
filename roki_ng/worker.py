@@ -18,6 +18,7 @@ def run(role, fds):
     running = True
     driver = None
     logs_dropped = 0
+    latest_body_telemetry = None
 
     def send(sock, message):
         queue = outgoing[sock]
@@ -26,6 +27,10 @@ def run(role, fds):
         queue.append(pack(message, IPC_LIMIT))
 
     def emit(op, body):
+        nonlocal latest_body_telemetry
+        if op == "body.telemetry":
+            latest_body_telemetry = {"abi": 1, "kind": "event", "op": op, "body": body}
+            return
         send(normal, {"abi": 1, "kind": "event", "op": op, "body": body})
 
     def log(level, message):
@@ -38,6 +43,9 @@ def run(role, fds):
     next_heartbeat = 0
     try:
         while running or any(outgoing.values()):
+            if running and latest_body_telemetry is not None and not outgoing[normal]:
+                send(normal, latest_body_telemetry)
+                latest_body_telemetry = None
             device_fds = driver.filenos() if running and driver and hasattr(driver, "filenos") else []
             readable, writable, _ = select.select(
                 [urgent, normal, *device_fds] if running else [],

@@ -639,8 +639,9 @@ UnicamSequence header extension и точного OSD. Реализация ос
 
 ## Запрашиваемые datastream
 
-Доступны `system.workers`, `motion.state`, `camera.state`, `detection.state`.
-Это snapshots состояния процессов, не измеренная телеметрия серв/IMU. Body state:
+Доступны `system.workers`, `motion.state`, `camera.state`, `detection.state`,
+`body.imu`, `body.stabilization`. Первые четыре являются snapshots состояния
+процессов, не измеренной телеметрией серв/IMU. Body state:
 state (ready/fault), pose, active_job, head (заданные ticks), error, simulated.
 Camera state: state, active_stream, video_state, packets, simulated.
 Также backend, frames_submitted, frames_skipped для runtime-video. Skipped
@@ -692,10 +693,47 @@ iceoryx2 сервис roki/detection/blobs/v1 публикует MessagePack р�
 Одна подписка на topic в сессии. `sample/op=data.sample`:
 `subscription`, `sequence` (номер этой подписки), `topic`, `valid`,
 `source_mono_ns`, `age_ms`, `data`. Первый snapshot приходит в пределах 50 мс.
-Источник обновляется heartbeat worker-а раз в 500 мс; увеличение rate до 10 Гц
+Для первых четырёх topics источник обновляется heartbeat worker-а раз в 500 мс; увеличение rate до 10 Гц
 не делает его аппаратной телеметрией. Timestamp соответствует получению heartbeat,
 а не моменту измерения. `valid=false` после потери worker-а; старые поля могут
 оставаться диагностическими и не должны рисоваться как актуальные измерения.
+
+### IMU тела и удержание приседа
+
+Подписка на `body.imu` или `body.stabilization` включает общий фоновый опрос IMU
+тела (цель 50 Гц, приоритет движениям); не требует захвата управления и не
+включает стабилизацию. Источник передаёт свежий snapshot в supervisor до 10 Гц,
+независимо от heartbeat. Несколько операторов используют один опрос. После
+отписки/истечения последней сессии он выключается, если не нужен регулятору
+или `body_imu.poll_enabled`. `data.snapshot` этих topics делает разовое чтение
+(или использует кеш младше 20 мс), без постоянной подписки.
+
+`body.imu.data`:
+
+- `valid`, `source_mono_ns`, `timestamp_kind="host_receive"`;
+- `sequence`: счётчик успешных RPC-чтений, **не номер кадра IMU сенсора**;
+- `quaternion_xyzw`: четыре float; `pitch_deg`, `roll_deg`;
+- `busy_reads`, `invalid_reads`: счётчики; `error`: последняя ошибка или null.
+
+Pitch положителен вперёд, roll вправо; ноль соответствует upright корпуса.
+При отсутствии образца quaternion, углы, timestamp и age_ms равны null.
+Данные старше 150 мс имеют valid=false. Timestamp относится к получению RPC
+на голове, не синхронизирован с камерой. Это **IMU тела, не IMU головы**.
+
+`body.stabilization.data`: `valid`, `source_mono_ns`, `enabled`,
+`scope="stationary_crouch_pitch"`, `reason`, `offset_deg`, `filtered_pitch_deg`,
+`target_correction_deg`, `saturated`, `updates` (принятые команды поправки).
+`valid` означает актуальное состояние доступного worker/тела, не успешное
+удержание. Reason: disabled, pose_not_supported, missing_targets, regulating,
+motion, queue_busy, imu_stale, tilt_outside_range, joint_limit, hard_stop,
+motion_fault, link_lost, absolute_motion. Не считать enabled признаком
+активного воздействия: при motion и ошибках поправка замораживается.
+
+Управление через `params.set` ключами `stabilization.*`; нужны lease и отсутствие
+активной задачи. По умолчанию disabled. Выключение не обнуляет поправку рывком;
+следующая абсолютная поза получает её управление своей штатной интерполяцией.
+При ходьбе/относительных прыжках замороженная поправка сохраняется.
+Описание ограничений и проверок: [CROUCH_STABILIZATION.md](CROUCH_STABILIZATION.md).
 
 ## Логи
 

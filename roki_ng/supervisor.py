@@ -35,7 +35,8 @@ READ_ONLY = {
     "params.keys", "params.describe", "params.get", "system.status", "system.capabilities",
     "system.operations", "session.heartbeat", "session.close",
 }
-TOPICS = ("system.workers", "motion.state", "camera.state", "detection.state")
+BODY_TOPICS = ("body.imu", "body.stabilization")
+TOPICS = ("system.workers", "motion.state", "camera.state", "detection.state", *BODY_TOPICS)
 LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
 REQUEST_WINDOW = 128
 
@@ -84,6 +85,9 @@ class Supervisor:
         self.alignment_task = None
         self.head_menu = self.head_buttons = self.voice = None
         self.button_task = None
+        self.body_telemetry = {}
+        self.body_watch = False
+        self.body_watch_lock = asyncio.Lock()
         self.local_session = Session(secrets.randbits(63) + 1, 0, (), "head-buttons")
 
     def spawn(self, coroutine):
@@ -174,6 +178,9 @@ class Supervisor:
         await self._release(self.local_session)
 
     def worker_event(self, role, op, body):
+        if role == "motherboard" and op == "body.telemetry":
+            self.body_telemetry = body
+            return  # Only requested datastreams, never unsolicited operator events.
         if self.head_menu and role == "motherboard" and not self.closing:
             if op in ("job.completed", "job.cancelled", "job.failed"):
                 self.spawn(self.head_menu._finish(body))
@@ -446,7 +453,7 @@ class Supervisor:
             await self._release(session)
             return {"released": True}
         if op.startswith("data."):
-            return self._data(session, op, body)
+            return await self._data(session, op, body)
         if op.startswith("log."):
             return self._logs(session, op, body)
         if op == "params.keys":
@@ -658,6 +665,8 @@ class Supervisor:
             await worker.call("calibration.resolve", {"job_id": ident, "error": error})
 
     def _snapshot(self, topic):
+        if topic in BODY_TOPICS:
+            return dict(self.body_telemetry.get(topic, {}))
         if topic == "system.workers":
             return {k: {"alive": w.alive, "state": w.state.get("state")} for k, w in self.workers.items()}
         role = {"motion.state": "motherboard", "camera.state": "stream", "detection.state": "detection"}.get(topic)
@@ -667,6 +676,17 @@ class Supervisor:
         return dict(worker.state) if worker else {"state": "starting"}
 
     def _sample(self, topic):
+        if topic in BODY_TOPICS:
+            data = self._snapshot(topic)
+            source = data.get("source_mono_ns")
+            age = (time.monotonic_ns() - source) / 1e6 if source is not None else None
+            worker = self.workers.get("motherboard")
+            limit = {"body.imu": 150, "body.stabilization": 500}[topic]
+            valid = bool(worker and worker.alive and data.get("valid")
+                         and age is not None and 0 <= age < limit)
+            return {"topic": topic, "valid": valid, "source_mono_ns": source,
+                    "age_ms": round(age) if age is not None else None,
+                    "data": data | {"valid": valid}}
         role = {"motion.state": "motherboard", "camera.state": "stream", "detection.state": "detection"}.get(topic)
         worker = self.workers.get(role)
         observed = worker.last_heartbeat if worker else time.monotonic()
@@ -674,19 +694,37 @@ class Supervisor:
                 "source_mono_ns": int(observed * 1e9),
                 "age_ms": round((time.monotonic() - observed) * 1000), "data": self._snapshot(topic)}
 
-    def _data(self, session, op, body):
+    async def _sync_body_watch(self):
+        async with self.body_watch_lock:
+            wanted = any(not s.closed and any(t in s.data for t in BODY_TOPICS)
+                         for s in self.sessions.values())
+            if wanted != self.body_watch:
+                await self.workers["motherboard"].call("body.telemetry.watch", {"enabled": wanted})
+                self.body_watch = wanted
+
+    async def _data(self, session, op, body):
         if op == "data.list":
-            return {"items": [{"name": t, "kind": "state", "max_rate_hz": 10, "schema": 1} for t in TOPICS]}
+            return {"items": [{"name": t, "kind": "state", "max_rate_hz": 10,
+                               "schema": 1} for t in TOPICS]}
         if op == "data.snapshot":
+            if body.get("topic") in BODY_TOPICS:
+                self.body_telemetry = await self.workers["motherboard"].call("body.telemetry.read", {})
             return self._sample(body.get("topic"))
         if op in ("data.subscribe", "data.update"):
             topic = body.get("topic")
             self._snapshot(topic)
             rate = number(body, "rate_hz", 2, 0.2, 10)
             session.data[topic] = {"rate": rate, "next": 0, "sequence": 0}
+            if topic in BODY_TOPICS:
+                try:
+                    await self._sync_body_watch()
+                except Exception:
+                    session.data.pop(topic, None)
+                    raise
             return {"subscription_id": topic, "rate_hz": rate}
         if op == "data.unsubscribe":
             session.data.pop(body.get("subscription_id"), None)
+            await self._sync_body_watch()
             return {}
         raise Fault("not_supported", op)
 
@@ -731,6 +769,10 @@ class Supervisor:
             return
         session.closed = True
         await self._release(session)
+        try:
+            await self._sync_body_watch()
+        except Fault as exc:
+            self.log("supervisor", "WARNING", f"Body telemetry release: {exc}")
         for ident in list(session.streams):
             try:
                 await self.workers["stream"].call("video.destroy", {"stream_id": ident})

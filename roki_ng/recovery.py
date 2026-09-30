@@ -40,7 +40,7 @@ def stable_position(body):
     for index in range(3):
         if body.stop_requested:
             return None
-        positions.append(body_position(body.hardware.body_quaternion()))
+        positions.append(body_position(body.read_body_quaternion()))
         if index < 2:
             yield "sleep", 0.05
     if len(set(positions)) != 1:
