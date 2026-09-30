@@ -737,6 +737,18 @@ motion_fault, link_lost, absolute_motion. Не считать enabled призн
 
 ### Позиции серв: body.servos
 
+Для встроенной тестовой диагностики: `params.set` ключа
+`stabilization.diagnostics_enabled` (default false, применять между задачами).
+Включает чтение IMU/позиций без подписчиков, но не включает регулятор.
+Вывод через обычный log.subscribe, до трёх строк в секунду. В
+body.stabilization.data.diagnostics: enabled, status, servo_sequence,
+source_mono_ns, hip_error_deg=[R,L], consecutive=[R,L]. При выключении только
+enabled=false. Status: stale, no_targets, motion_or_other_pose, changing_target,
+within_tolerance, difference, persistent_difference. Допуск 2°, выдержка
+неизменной цели 300 мс, WARNING после трёх разных чтений с превышением.
+Это эвристика сравнения с конечной целью, не подтверждение работоспособности
+или отказа сервы. Управление и поправки не меняет.
+
 `motion.joints {offset:0, limit:8}` доступен наблюдателю без lease. Возвращает
 обычную страницу items/next_offset/total (30). Элемент: unit, name, id, sio.
 Это фиксированная раскладка ROKI/Kondo, **не скан физических серв**. Unit24

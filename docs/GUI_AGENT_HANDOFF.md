@@ -133,3 +133,12 @@ IMU тела в [OPERATOR_PROTOCOL_V1.md](OPERATOR_PROTOCOL_V1.md).
 Пользователь наблюдает данные через подписки в GUI, без отдельных консольных
 наблюдателей. Диагностику реализуем внутри runtime с выводом через обычные
 datastream и log.subscribe. Отдельный CLI для оператора не нужен.
+
+Тестовая диагностика включается `stabilization.diagnostics_enabled=true`
+через params.set между задачами (default false). Сама включает опрос позиций
+5 Гц и IMU, но не стабилизатор. В обычном логе до трёх строк в секунду:
+pitch/поправка/причина, затем nominal/sent/measured для ID7 справа и слева.
+В body.stabilization добавлен diagnostics: enabled, status, servo_sequence,
+source_mono_ns, hip_error_deg=[R,L], consecutive=[R,L]. Это наблюдение,
+не новый контур управления. WARNING означает устойчивое расхождение, не
+доказанный отказ мотора; свежесть каждой сервы всё ещё неизвестна.

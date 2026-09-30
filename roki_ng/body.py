@@ -18,6 +18,7 @@ from .motion import slots
 from .body_imu import BodyImu
 from .body_servos import BodyServos
 from .stabilization import CrouchStabilizer
+from .stabilization_diagnostics import StabilizationDiagnostics
 
 ASSETS = Path(__file__).with_name("assets")
 
@@ -186,6 +187,7 @@ class Body:
         self.servo_watch = False
         self.body_imu = BodyImu()
         self.stabilizer = CrouchStabilizer()
+        self.stabilization_diagnostics = StabilizationDiagnostics()
         self.telemetry_watch = False
         self.telemetry_at = 0
         self.stabilization_warning = None
@@ -601,10 +603,12 @@ class Body:
         return {"body.imu": self.body_imu.state(now),
                 "body.servos": self.body_servos.state(now),
                 "body.stabilization": self.stabilizer.state(self.parameters) | {
+                    "diagnostics": self.stabilization_diagnostics.result,
                     "source_mono_ns": int(now * 1e9), "valid": self.body_connected}}
 
     def _publish_body_telemetry(self):
         now = time.monotonic()
+        self.stabilization_diagnostics.tick(self, now)
         warning = self.stabilizer.reason if self.stabilizer.reason in (
             "imu_stale", "tilt_outside_range", "joint_limit") else (
                 "saturated" if self.stabilizer.saturated and self.stabilizer.reason == "regulating" else None)
@@ -620,6 +624,7 @@ class Body:
 
     def _tick_body_imu(self):
         if not (self.telemetry_watch or self.parameters["body_imu.poll_enabled"]
+                or self.parameters["stabilization.diagnostics_enabled"]
                 or self.parameters["stabilization.enabled"]):
             return
         now = time.monotonic()
@@ -658,7 +663,7 @@ class Body:
     def _tick_body_servos(self):
         now = time.monotonic()
         if (not self.body_connected
-                or not self.servo_watch
+                or not (self.servo_watch or self.parameters["stabilization.diagnostics_enabled"])
                 or now < self.body_servos.next_at
                 or (self.plan and now >= self.next_at)):
             return
