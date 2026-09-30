@@ -178,12 +178,15 @@ class Localisation:
                     try:
                         if debug_channel is None:
                             debug_channel=Channel(LOCALISATION_TOPIC,publisher=True)
-                        from .localisation_debug import video_frame
-                        annotated=video_frame(image,projector,imu[2:6],lines,circle,posts,result,engine.model,engine.circles)
-                        if self.stop_event.is_set() or self.generation!=generation:break
-                        with debug_channel.loan(FRAME_BYTES) as target:
-                            FRAME_HEADER.pack_into(target,0,*header)
-                            target[FRAME_HEADER.size:]=annotated.tobytes()
+                        # Stream's FrameReader exists only while video is requested.
+                        if debug_channel.has_subscribers():
+                            from .localisation_debug import video_frame
+                            annotated=video_frame(image,projector,imu[2:6],lines,circle,posts,result,engine.model,engine.circles)
+                            if self.stop_event.is_set() or self.generation!=generation:break
+                            if debug_channel.has_subscribers():
+                                with debug_channel.loan(FRAME_BYTES) as target:
+                                    FRAME_HEADER.pack_into(target,0,*header)
+                                    target[FRAME_HEADER.size:]=annotated.tobytes()
                     except Exception as exc:
                         # A failed diagnostic sink must not stop pose estimation.
                         # Disable it until the next localisation.start, without a retry loop.

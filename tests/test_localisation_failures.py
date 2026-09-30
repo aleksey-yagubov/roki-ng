@@ -30,7 +30,17 @@ def test_clustering_checks_sample_count():
             field_observations.clusters(np.zeros((count, 3), np.float32), 3)
 
 
-@pytest.mark.parametrize('failure', ['frame', 'render', 'publisher', 'loan'])
+def test_channel_checks_current_subscriber_count():
+    channel = object.__new__(dataplane.Channel)
+    count = [0]
+    channel.service = NS(dynamic_config=lambda: NS(number_of_subscribers=lambda: count[0]))
+    for value in (0, 1, 2, 0, 1):
+        count[0] = value
+        assert channel.has_subscribers() is (value > 0)
+
+
+@pytest.mark.parametrize('failure', ['frame', 'render', 'publisher', 'loan',
+                                     'no_subscriber', 'subscription_changes', 'stop_during_render'])
 def test_localisation_continues_after_bad_frame_or_video_failure(tmp_path, monkeypatch, failure):
     logs, events, rendered, published, channels = [], [], [], [], {}
     worker = localisation_worker.Localisation(
@@ -46,7 +56,7 @@ def test_localisation_continues_after_bad_frame_or_video_failure(tmp_path, monke
 
         def wait_and_process(self):
             clock[0] += .3
-            if self.calls == 2:
+            if self.calls == (5 if failure == 'subscription_changes' else 2):
                 worker.stop_event.set()
                 return
             seq = self.calls
@@ -75,6 +85,15 @@ def test_localisation_continues_after_bad_frame_or_video_failure(tmp_path, monke
                 return None
             data = self.queue.popleft()
             return NS(payload=lambda: NS(as_memory_view=lambda: memoryview(data)))
+
+        def has_subscribers(self):
+            if failure == 'no_subscriber':
+                return False
+            if failure == 'subscription_changes':
+                return waitset.calls in (2, 4)
+            if failure == 'stop_during_render':
+                return not rendered
+            return True
 
         @contextmanager
         def loan(self, size):
@@ -119,14 +138,22 @@ def test_localisation_continues_after_bad_frame_or_video_failure(tmp_path, monke
     engine = Engine()
     worker._run(engine, NS(project=lambda *a: np.zeros((720, 720), np.uint8)), 0, worker.generation)
     assert worker.error is None
-    assert engine.sequence == 1 and worker.frames == 2
-    assert worker.result['frame_sequence'] == 1
+    last = 4 if failure == 'subscription_changes' else 1
+    assert engine.sequence == last and worker.frames == last + 1
+    assert worker.result['frame_sequence'] == last
     assert all(c.closed for c in channels.values())
     worker.tick()
     worker.tick()
     if failure == 'frame':
         assert 'after erosion' in rendered[0]['reason']
         assert published == [0, 1] and not logs
+    elif failure == 'no_subscriber':
+        assert not rendered and not published and not logs
+    elif failure == 'subscription_changes':
+        assert [r['frame_sequence'] for r in rendered] == [1, 3]
+        assert published == [1, 3] and not logs
+    elif failure == 'stop_during_render':
+        assert len(rendered) == 1 and not published and not logs
     else:
         assert len(logs) == 1 and logs[0][0] == 'WARNING'
         assert 'computation continues' in logs[0][1]

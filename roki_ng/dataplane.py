@@ -64,6 +64,10 @@ class Channel:
         """Caller must retain sample for the entire lifetime of any payload view."""
         return self.subscriber.receive()
 
+    def has_subscribers(self):
+        """Current demand, independent of whether any frames have been sent."""
+        return self.service.dynamic_config().number_of_subscribers() > 0
+
     def drain(self):
         self.listener.try_wait()
         while (sample := self.receive()) is not None:
