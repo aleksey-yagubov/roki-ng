@@ -13,6 +13,8 @@ import uuid
 from .motion.model import Robot
 from .wire import Fault, boolean, choice, number, page
 from .calibration import TestPlan, TITLES, MEASUREMENTS, describe
+from .calibration import quaternion_yaw, wrap
+from .motion import slots
 
 ASSETS = Path(__file__).with_name("assets")
 
@@ -256,7 +258,8 @@ class Body:
             return dict(job)
         if self.calibration_pending and op in (
                 "control.acquire", "params.apply", "test.start", "motion.pose", "motion.drive",
-                "motion.jump", "motion.slot", "motion.kick", "motion.head"):
+                "motion.jump", "motion.slot", "motion.kick", "motion.head",
+                "motion.get_up", "motion.splits"):
             raise Fault("busy", "Calibration parameters are being saved", True)
         if op == "control.acquire":
             if self.active:
@@ -285,7 +288,7 @@ class Body:
                 self.engine.configure(self.parameters)
             if geometry_changed:
                 self.engine = None
-                if self.pose == "crouch":
+                if self.pose in ("crouch", "crouch_centered"):
                     self.pose = "unknown"
             return {}
         if op == "motion.slots":
@@ -346,7 +349,8 @@ class Body:
         if op == "motion.drive":
             drive = {axis: number(args, axis, 0.0, -1, 1) for axis in ("x", "y", "yaw")}
             drive["speed"] = number(args, "speed", 0.5, 0.1, 1)
-            drive["hold_crouch"] = boolean(args, "hold_crouch", True)
+            drive["crouch"] = choice(args, "crouch", "off", ("off", "on", "centered"))
+            drive["heading_hold"] = boolean(args, "heading_hold", False)
             active = any(abs(drive[a]) > 0.05 for a in ("x", "y", "yaw"))
             if self.active and self.jobs[self.active]["operation"] != "motion.drive":
                 raise Fault("busy", "One-shot motion running", True)
@@ -362,23 +366,42 @@ class Body:
             raise Fault("motion_fault", self.error)
         if op == "motion.pose":
             name = choice(args, "name", None, ("base_stand", "crouch", "stand", "head_field"))
+            if name == "crouch" and choice(args, "crouch", "on", ("on", "centered")) == "centered":
+                name = "crouch_centered"
             return self._start(op, self._pose(name))
         if op == "motion.slot":
             name = args.get("name")
             if name not in self.slots:
                 raise Fault("not_found", "Unknown software slot")
             factor = number(args, "speed_factor", 1.0, 0.25, 2)
-            rows = json.loads((ASSETS / "slots" / f"{name}.json").read_text())[name]
+            document = json.loads((ASSETS / "slots" / f"{name}.json").read_text())
+            if "frames" in document:
+                steps = slots.decode(document, self.model, factor)
+                return self._start(op, self._individual_slot(steps))
+            if document.get("units", "kondo") != "kondo":
+                raise Fault("invalid_motion", "Legacy combined-knee rows require Kondo units")
+            rows = document[name]
             self._validate_rows(rows, factor)
             return self._start(op, self._slot(rows, factor))
         if op == "motion.jump":
             direction = choice(args, "direction", "forward", tuple(self.jumps) + ("turn_left", "turn_right"))
             fraction = number(args, "fraction", 1.0, 0.1, 1)
-            if boolean(args, "hold_crouch", False):
-                steps = self._crouch_jump_steps(direction, fraction)
-                return self._start(op, self._crouch_jump(steps))
+            crouch = choice(args, "crouch", "off", ("off", "on", "centered"))
+            if crouch != "off":
+                target = "crouch_centered" if crouch == "centered" else "crouch"
+                if self.pose == target or self.pose == "base_stand":
+                    steps = self._relative_jump_steps(direction, fraction)
+                    return self._start(op, self._relative_jump(steps))
+                return self._start(op, self._prepare_jump(direction, fraction, target))
             rows = self._jump_rows(direction, fraction)
             return self._start(op, self._slot(rows, legs_only=direction.startswith("turn_")))
+        if op == "motion.get_up":
+            crouch = choice(args, "crouch", "off", ("off", "on", "centered"))
+            return self._start(op, self._get_up(crouch))
+        if op == "motion.splits":
+            kind = choice(args, "kind", "small", ("small", "big"))
+            crouch = choice(args, "crouch", "off", ("off", "on", "centered"))
+            return self._start(op, self._splits(kind, crouch))
         if op == "motion.kick":
             leg = choice(args, "leg", "right", ("right", "left"))
             power = number(args, "power", 80, 1, 100, True)
@@ -540,6 +563,22 @@ class Body:
         if name == "stand" and self.pose == "unknown":
             yield from self._pose("base_stand")
             return
+        if name == "crouch_centered" or (name == "crouch" and self.pose in (
+                "crouch_centered", "splits_small", "splits_big")):
+            yield from self._static_crouch(name == "crouch_centered")
+            return
+        if name == "stand" and self.pose in ("splits_small", "splits_big", "crouch_centered"):
+            _, values = self._crouch_target(True, height=215)
+            # Match walk_Final_Pose's neutral arms at a reachable leg extension.
+            for value in values:
+                if value.Id in (1, 2, 3, 4):
+                    value.Data = 7500
+            frames = self.parameters["walk.crouch_transition_frames"]
+            self.pose, self.engine = "unknown", None
+            yield "servo", values, frames, frames - 1
+            yield "drain",
+            self.pose = "stand"
+            return
         if name == "crouch":
             # Entering gait from another pose must not reuse its foot geometry.
             self.engine = None
@@ -548,7 +587,12 @@ class Body:
             yield from self._slot(rows)
             yield from self._head(0, 0)
         elif self.simulated:
-            yield "sleep", 0.08
+            if name == "crouch":
+                _, values = self._crouch_target(False)
+                yield "servo", values, 4, 3
+                yield "drain",
+            else:
+                yield "sleep", 0.08
         elif name == "crouch":
             yield from self._engine().walk_Initial_Pose(start_mixing=False)
             yield "drain",
@@ -565,24 +609,38 @@ class Body:
         if self.pose != "crouch":
             yield from self._pose("crouch")
         cycle = 0
-        hold = True
+        crouch = (fixed or self.drive or {}).get("crouch", "off")
+        heading = None
         while True:
             drive = fixed if fixed is not None else self.drive
             active = fixed is not None or (drive and time.monotonic() < self.drive_deadline
                        and any(abs(drive[a]) > 0.05 for a in ("x", "y", "yaw")))
             if self.stop_requested or not active or (cycles is not None and cycle >= cycles):
                 break
-            hold = drive["hold_crouch"]
+            crouch = drive["crouch"]
+            right_first = drive["y"] < 0
+            rotation = drive["yaw"] * self.parameters["walk.max_yaw_rad"] * drive["speed"]
+            if drive.get("heading_hold", False) and abs(drive["yaw"]) <= 0.05:
+                measured = quaternion_yaw(self.hardware.body_quaternion())
+                if heading is None:
+                    heading = measured
+                limit = self.parameters["walk.heading_max_correction_rad"]
+                rotation = max(-limit, min(limit, wrap(measured - heading)
+                    * self.parameters["walk.heading_kp"] * (-1 if right_first else 1)))
+            else:
+                heading = None
             if self.simulated:
                 yield "sleep", 0.08
             else:
                 engine = self._engine()
-                engine.first_Leg_Is_Right_Leg = drive["y"] < 0
+                engine.first_Leg_Is_Right_Leg = right_first
                 yield from engine.walk_Cycle(
                     drive["x"] * self.parameters["walk.max_step_mm"] * drive["speed"],
                     abs(drive["y"]) * self.parameters["walk.max_side_mm"] * drive["speed"],
-                    drive["yaw"] * self.parameters["walk.max_yaw_rad"] * drive["speed"],
+                    rotation,
                     cycle, 1000000)
+            if drive.get("heading_hold", False):
+                yield "drain",
             cycle += 1
             self.jobs[self.active]["progress"] = cycle
             self.emit("job.progress", dict(self.jobs[self.active]))
@@ -591,8 +649,95 @@ class Body:
             yield from self._engine().walk_Cycle(0, 0, 0, 0, 1)
         yield "drain",
         self.pose = "crouch"
-        if not hold:
+        if crouch == "centered":
+            yield from self._static_crouch(True)
+        elif crouch == "off":
             yield from self._pose("stand")
+
+    def _crouch_target(self, centered, height=None):
+        if self.simulated:
+            # Protocol simulation has no IK or physical geometry. These neutral
+            # targets exist only to exercise selective-joint command bookkeeping.
+            addresses = {(s, b) for s, b, *_ in self.model.ACTIVESERVOS[:21]}
+            addresses.update(((13, 1), (13, 2)))
+            return None, [SimpleNamespace(Id=s, Sio=b, Data=7500)
+                          for s, b in sorted(addresses)]
+        from .motion.engine import Engine
+        engine = Engine(self.parameters, log=self.log)
+        if height is not None:
+            engine.gaitHeight = height
+        return engine, engine.crouch_target(centered)
+
+    def _static_crouch(self, centered, frames=None):
+        engine, values = self._crouch_target(centered)
+        frames = frames or self.parameters["walk.crouch_transition_frames"]
+        self.pose, self.engine = "unknown", None
+        yield "servo", values, frames, frames - 1
+        yield "drain",
+        self.pose = "crouch_centered" if centered else "crouch"
+        self.engine = engine
+
+    def _prepare_jump(self, direction, fraction, target):
+        yield from self._static_crouch(target == "crouch_centered")
+        yield from self._relative_jump(self._relative_jump_steps(direction, fraction))
+
+    def _individual_slot(self, steps):
+        self.pose, self.engine = "unknown", None
+        yield from steps
+        yield "drain",
+
+    def _splits(self, kind, crouch):
+        steps = slots.decode(slots.splits(kind == "big"), self.model)
+        # Always prepare before the deep entry, including a request from stand.
+        target = "crouch_centered" if crouch == "centered" else "crouch"
+        if self.pose != target:
+            yield from self._static_crouch(target == "crouch_centered")
+        yield from self._individual_slot(steps)
+        self.pose = f"splits_{kind}"
+
+    def _get_up(self, crouch):
+        from .recovery import SLOTS, stable_position
+        position = yield from stable_position(self)
+        if position is None:
+            return
+        job = self.jobs[self.active]
+        job.update(initial_posture=position, stage="getting_up")
+        self.emit("job.progress", dict(job))
+        target = "crouch_centered" if crouch == "centered" else "crouch"
+        if position == "upright":
+            yield from self._pose("base_stand" if crouch == "off" else target)
+            return
+        name = SLOTS[position]
+        rows = json.loads((ASSETS / "slots" / f"{name}.json").read_text())[name]
+        self.recovery_active = True
+        try:
+            if crouch == "off":
+                yield from self._slot(rows)
+                self.pose = "stand"
+            else:
+                engine, values = self._crouch_target(crouch == "centered")
+                steps = list(self._slot(rows))
+                # Side recovery has straight legs in every row: fold them from
+                # its first frame, retaining the original arm support sequence.
+                if position in ("left", "right"):
+                    legs = [v for v in values if 5 <= v.Id <= 10 or v.Id == 13]
+                    for index, step in enumerate(steps[:-1]):
+                        _, original, frames, pause = step
+                        steps[index] = ("servo", [v for v in original
+                            if not (5 <= v.Id <= 10 or v.Id == 13)] + legs, frames, pause)
+                # Back/stomach recovery ends directly in the calculated crouch,
+                # not in the old straight-leg last frame followed by sitting down.
+                frames = int(rows[-1][0])
+                steps[-2] = ("servo", values, frames, frames - 1)
+                yield from steps
+                self.engine, self.pose = engine, target
+            verified = yield from stable_position(self)
+            if verified != "upright":
+                raise Fault("get_up_failed", f"Body is still {verified}; no automatic retry")
+            job.update(stage="upright", posture_verified=True)
+            self.emit("job.progress", dict(job))
+        finally:
+            self.recovery_active = False
 
     def _kick(self, leg, power, offset):
         self.engine = None
@@ -636,9 +781,9 @@ class Body:
             yield "servo", values, frames, frames - 1
         yield "drain",
 
-    def _crouch_jump_steps(self, direction, fraction):
-        if self.pose != "crouch":
-            raise Fault("invalid_state", "hold_crouch jump requires crouch; no automatic pose change")
+    def _relative_jump_steps(self, direction, fraction):
+        if self.pose not in ("crouch", "crouch_centered", "base_stand"):
+            raise Fault("invalid_state", "Relative jump requires crouch or base_stand")
         ids = {5, 10} if direction.startswith("turn_") else (
             {9, 10} if direction in ("forward", "backward") else {6, 10})
         selected = [(i, servo, bus, sign) for i, (servo, bus, sign, *_) in
@@ -667,14 +812,15 @@ class Body:
             steps.append(("servo", values, frames, frames - 1))
         return steps
 
-    def _crouch_jump(self, steps):
+    def _relative_jump(self, steps):
         engine = self.engine
+        pose = self.pose
         self.pose = "unknown"
         self.engine = None
         yield from steps
         yield "drain",
         # Only a completed return to the baseline may reuse the gait state.
-        self.pose = "crouch"
+        self.pose = pose
         self.engine = engine
 
     def _jump_rows(self, direction, fraction):

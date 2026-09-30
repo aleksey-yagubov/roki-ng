@@ -94,7 +94,10 @@ def test_walk_from_unknown_prepares_crouch_without_separate_command(tmp_path):
     body, _, _ = make_body(tmp_path)
     body.command("motion.drive", {"x": 1})
     assert body.pose == "unknown"
-    assert next(body.plan) == ("sleep", 0.08)  # Simulated initial crouch.
+    kind, values, frames, pause = next(body.plan)
+    assert kind == "servo" and values  # Simulated initial crouch targets.
+    assert (frames, pause) == (4, 3)
+    assert next(body.plan) == ("drain",)
     next(body.plan)
     assert body.pose == "crouch"
 

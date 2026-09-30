@@ -20,6 +20,7 @@ OPS = (
     "session.heartbeat", "session.close", "system.status", "system.capabilities", "system.operations",
     "system.restart_stream_worker", "control.acquire", "control.release", "mode.set",
     "motion.drive", "motion.head", "motion.pose", "motion.jump", "motion.kick", "motion.slot",
+    "motion.get_up", "motion.splits",
     "motion.slots", "motion.stop_graceful", "motion.stop_hard", "job.status", "job.cancel",
     "test.list", "test.describe", "test.start", "test.measure", "camera.capabilities", "video.capabilities", "video.create",
     "video.start", "video.status", "video.update", "video.stop", "video.destroy",
