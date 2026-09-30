@@ -81,8 +81,8 @@ def test_video_lifecycle_does_not_open_on_query():
     video = Streams({"simulate": True}, lambda *a: events.append(a), lambda *a: None)
     video.command("camera.capabilities", {})
     info = video.command("video.create", {"host": "127.0.0.1"})
-    assert video.active is None
-    assert video.Gst is None
+    assert not video.state()["active_streams"]
+    assert all(p.Gst is None for p in video.pipelines.values())
     text = pipeline_description(info["spec"])
     assert "width=1600,height=1300,depth=10" in text
     assert "width=800,height=650,framerate=60/1" in text
@@ -94,7 +94,7 @@ def test_video_lifecycle_does_not_open_on_query():
     video.command("video.stop", {"stream_id": info["stream_id"]})
     video.command("video.start", {"stream_id": other["stream_id"]})
     video.close()
-    assert video.active is None
+    assert not video.state()["active_streams"]
     with pytest.raises(Fault):
         video_spec({"output": {"width": 801}})
 
@@ -217,7 +217,7 @@ def test_dead_client_cleanup(tmp_path):
             assert not server.sessions
             assert server.owner is None
             state = await server.workers["stream"].call("state")
-            assert state["active_stream"] is None
+            assert not state["active_streams"]
         finally:
             await server.close()
     asyncio.run(exercise())

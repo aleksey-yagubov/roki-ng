@@ -566,6 +566,7 @@ class Supervisor:
             async with self.capture_lock:
                 self.require_control(session, body)
                 if op == "localisation.stop":
+                    await self.workers["stream"].call("video.stop_localisation")
                     return await self.workers["localisation"].call(op)
                 if self.mode != "MANUAL":
                     raise Fault("invalid_state", "Select MANUAL mode")
@@ -601,10 +602,13 @@ class Supervisor:
                 if self.mode != "MANUAL":
                     raise Fault("invalid_state", "Select MANUAL mode")
                 stream = await self.workers["stream"].call("state")
-                if stream.get("active_stream"):
+                if any(s["backend"]=="direct-gst" for s in stream.get("active_streams",[])):
                     raise Fault("busy", "Stop direct-gst before starting capture")
-                if (await self.workers["camera"].call("camera.status"))["prepared"]:
-                    raise Fault("busy", "Camera already prepared or running")
+                camera=await self.workers["camera"].call("camera.status")
+                if camera.get('running') and (not with_imu or camera.get('imu_sync',{}).get('state') in ('aligning','matched','synced')):
+                    return camera
+                if camera["prepared"]:
+                    raise Fault("busy", "Camera already prepared without requested IMU; stop capture explicitly to reconfigure")
                 try:
                     result = await self.workers["camera"].call("camera.prepare", body, timeout=10)
                     self.capture_session = object()

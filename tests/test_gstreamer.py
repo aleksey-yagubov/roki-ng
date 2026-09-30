@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-from roki_ng.stream import Streams
+from roki_ng.stream import StreamPipeline
 from roki_ng.dataplane import FRAME_HEADER
 from roki_ng.runtime_video import RuntimeVideo
 
@@ -19,7 +19,7 @@ def test_real_gstreamer_rtp_loopback():
     receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     receiver.bind(("127.0.0.1", 0))
     receiver.setblocking(False)
-    video = Streams({"simulate": True, "test_video": True}, lambda *a: None, lambda *a: None)
+    video = StreamPipeline({"simulate": True, "test_video": True}, lambda *a: None, lambda *a: None)
     try:
         info = video.command("video.create", {"host": "127.0.0.1", "codec": {"name": "jpeg"},
                                               "output": {"width": 320, "height": 240, "fps": 15},
@@ -76,7 +76,7 @@ def test_runtime_appsrc_jpeg_decode_and_colour(monkeypatch):
         'udpsrc name=udp port=0 caps="application/x-rtp,media=video,encoding-name=JPEG,payload=26,clock-rate=90000" '
         '! rtpjpegdepay ! jpegdec ! videoconvert ! video/x-raw,format=BGR '
         '! appsink name=decoded sync=false max-buffers=1 drop=true')
-    video = Streams({"test_video": True}, lambda *a: None, lambda *a: None)
+    video = StreamPipeline({"test_video": True}, lambda *a: None, lambda *a: None)
     try:
         receiver.set_state(Gst.State.PLAYING)
         receiver.get_state(Gst.SECOND)

@@ -72,7 +72,7 @@ def pipeline_description(spec, test_source=False):
             "! udpsink name=network sync=false async=false close-socket=false")
 
 
-class Streams:
+class StreamPipeline:
     def __init__(self, config, emit, log):
         self.emit, self.log = emit, log
         self.simulated = config.get("simulate", False) and not config.get("test_video", False)
@@ -272,3 +272,59 @@ class Streams:
     def close(self):
         self._stop()
         self.streams.clear()
+
+
+class Streams:
+    """Two independent shared-frame pipelines; direct camera access is exclusive."""
+    def __init__(self,config,emit,log):
+        self.config,self.emit,self.log=config,emit,log
+        self.pipelines={}
+
+    def state(self):
+        active=[p.state() for p in self.pipelines.values() if p.active]
+        return {'state':'ready','active_streams':[
+            {'stream_id':p['active_stream'],'backend':p['backend'],'state':p['video_state']}
+            for p in active], 'packets':sum(p['packets'] for p in active),
+            'frames_submitted':sum(p['frames_submitted'] for p in active),
+            'frames_skipped':sum(p['frames_skipped'] for p in active),
+            'simulated':bool(self.config.get('simulate',False))}
+
+    def command(self,op,args):
+        if op=='state':return self.state()
+        if op in ('camera.capabilities','video.capabilities'):
+            return StreamPipeline(self.config,self.emit,self.log).command(op,args)|{'max_active':2}
+        if op in ('video.stop_runtime','video.stop_localisation'):
+            sources=('runtime','localisation') if op=='video.stop_runtime' else ('localisation',)
+            for p in self.pipelines.values():
+                if p.active and p.streams[p.active]['spec']['backend'] in sources:
+                    ident=p.active;p._stop()
+                    self.emit('video.stopped',{'stream_id':ident,'reason':'source_stopped'})
+            return self.state()
+        if op=='video.create':
+            if len(self.pipelines)>=8:raise Fault('busy','Stream definition limit reached',True)
+            p=StreamPipeline(self.config,self.emit,self.log)
+            info=p.command(op,args);self.pipelines[info['stream_id']]=p
+            return info
+        ident=args.get('stream_id')
+        if ident not in self.pipelines:raise Fault('not_found','Unknown stream')
+        p=self.pipelines[ident]
+        if op=='video.start' and not p.active:
+            spec=p.streams[ident]['spec'];backend=spec['backend']
+            for other in self.pipelines.values():
+                if not other.active:continue
+                info=other.streams[other.active];source=info['spec']['backend']
+                if 'direct-gst' in (backend,source) or backend==source:
+                    raise Fault('camera_busy','Another stream owns this source')
+                if info['host']==p.streams[ident]['host'] and info['spec']['destination']==spec['destination']:
+                    raise Fault('invalid_argument','Concurrent streams require different RTP ports')
+        result=p.command(op,args)
+        if op=='video.destroy':
+            p.close();del self.pipelines[ident]
+        return result
+
+    def tick(self):
+        for p in self.pipelines.values():p.tick()
+
+    def close(self):
+        for p in self.pipelines.values():p.close()
+        self.pipelines.clear()
