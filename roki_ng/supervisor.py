@@ -21,7 +21,7 @@ OPS = (
     "system.restart_stream_worker", "control.acquire", "control.release", "mode.set",
     "motion.drive", "motion.head", "motion.pose", "motion.jump", "motion.kick", "motion.slot",
     "motion.get_up", "motion.splits",
-    "motion.slots", "motion.stop_graceful", "motion.stop_hard", "job.status", "job.cancel",
+    "motion.slots", "motion.joints", "motion.stop_graceful", "motion.stop_hard", "job.status", "job.cancel",
     "test.list", "test.describe", "test.start", "test.measure", "camera.capabilities", "video.capabilities", "video.create",
     "video.start", "video.status", "video.update", "video.stop", "video.destroy",
     "params.keys", "params.describe", "params.get", "params.set",
@@ -31,11 +31,11 @@ OPS = (
 READ_ONLY = {
     "camera.status",
     "detection.list", "detection.status",
-    "motion.slots", "test.list", "test.describe", "job.status", "camera.capabilities", "video.capabilities",
+    "motion.slots", "motion.joints", "test.list", "test.describe", "job.status", "camera.capabilities", "video.capabilities",
     "params.keys", "params.describe", "params.get", "system.status", "system.capabilities",
     "system.operations", "session.heartbeat", "session.close",
 }
-BODY_TOPICS = ("body.imu", "body.stabilization")
+BODY_TOPICS = ("body.imu", "body.stabilization", "body.servos")
 TOPICS = ("system.workers", "motion.state", "camera.state", "detection.state", *BODY_TOPICS)
 LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
 REQUEST_WINDOW = 128
@@ -87,6 +87,7 @@ class Supervisor:
         self.button_task = None
         self.body_telemetry = {}
         self.body_watch = False
+        self.body_servo_watch = False
         self.body_watch_lock = asyncio.Lock()
         self.local_session = Session(secrets.randbits(63) + 1, 0, (), "head-buttons")
 
@@ -681,7 +682,7 @@ class Supervisor:
             source = data.get("source_mono_ns")
             age = (time.monotonic_ns() - source) / 1e6 if source is not None else None
             worker = self.workers.get("motherboard")
-            limit = {"body.imu": 150, "body.stabilization": 500}[topic]
+            limit = {"body.imu": 150, "body.stabilization": 500, "body.servos": 600}[topic]
             valid = bool(worker and worker.alive and data.get("valid")
                          and age is not None and 0 <= age < limit)
             return {"topic": topic, "valid": valid, "source_mono_ns": source,
@@ -698,22 +699,28 @@ class Supervisor:
         async with self.body_watch_lock:
             wanted = any(not s.closed and any(t in s.data for t in BODY_TOPICS)
                          for s in self.sessions.values())
-            if wanted != self.body_watch:
-                await self.workers["motherboard"].call("body.telemetry.watch", {"enabled": wanted})
+            servos = any(not s.closed and "body.servos" in s.data for s in self.sessions.values())
+            if wanted != self.body_watch or servos != self.body_servo_watch:
+                args = {"enabled": wanted}
+                if servos or self.body_servo_watch:
+                    args["servos"] = servos
+                await self.workers["motherboard"].call("body.telemetry.watch", args)
                 self.body_watch = wanted
+                self.body_servo_watch = servos
 
     async def _data(self, session, op, body):
         if op == "data.list":
-            return {"items": [{"name": t, "kind": "state", "max_rate_hz": 10,
+            return {"items": [{"name": t, "kind": "state", "max_rate_hz": 5 if t == "body.servos" else 10,
                                "schema": 1} for t in TOPICS]}
         if op == "data.snapshot":
             if body.get("topic") in BODY_TOPICS:
-                self.body_telemetry = await self.workers["motherboard"].call("body.telemetry.read", {})
+                args = {"servos": True} if body["topic"] == "body.servos" else {}
+                self.body_telemetry = await self.workers["motherboard"].call("body.telemetry.read", args)
             return self._sample(body.get("topic"))
         if op in ("data.subscribe", "data.update"):
             topic = body.get("topic")
             self._snapshot(topic)
-            rate = number(body, "rate_hz", 2, 0.2, 10)
+            rate = number(body, "rate_hz", 2, 0.2, 5 if topic == "body.servos" else 10)
             session.data[topic] = {"rate": rate, "next": 0, "sequence": 0}
             if topic in BODY_TOPICS:
                 try:

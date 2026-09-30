@@ -16,6 +16,7 @@ from .calibration import TestPlan, TITLES, MEASUREMENTS, describe
 from .calibration import quaternion_yaw, wrap
 from .motion import slots
 from .body_imu import BodyImu
+from .body_servos import BodyServos
 from .stabilization import CrouchStabilizer
 
 ASSETS = Path(__file__).with_name("assets")
@@ -106,7 +107,19 @@ class RokiHardware:
             raise Fault("imu_invalid", "Body IMU response must contain 8 bytes")
         return tuple(value / 16384 for value in struct.unpack("<hhhh", bytes(raw)))
 
+    def body_positions(self):
+        ok, raw = self.rcb.moveRamToComCmdSynchronize(0x0070, 60)
+        self.check(ok, self.rcb)
+        if len(raw) != 60:
+            raise Fault("servo_data_invalid", "Body positions response must contain 60 bytes")
+        return struct.unpack("<30h", bytes(raw))
+
+
 class SimHardware:
+    def body_positions(self):
+        # Synthetic neutral feedback; never pretend it follows commanded targets.
+        return (0,) * 30
+
     def check_queue(self):
         pass
 
@@ -168,6 +181,9 @@ class Body:
         self.engine = None
         self.servo_targets = {}
         self.sent_targets = {}
+        self.target_times = {}
+        self.body_servos = BodyServos(self.model)
+        self.servo_watch = False
         self.body_imu = BodyImu()
         self.stabilizer = CrouchStabilizer()
         self.telemetry_watch = False
@@ -223,14 +239,18 @@ class Body:
     def _command(self, op, args):
         if op == "body.telemetry.watch":
             self.telemetry_watch = boolean(args, "enabled", False)
+            self.servo_watch = self.telemetry_watch and boolean(args, "servos", False)
             self.telemetry_at = 0
             return {}
         if op == "body.telemetry.read":
             if self.body_connected:
                 try:
-                    self.read_body_quaternion(max_age=0.02)
+                    if boolean(args, "servos", False):
+                        self.body_servos.read(self)
+                    else:
+                        self.read_body_quaternion(max_age=0.02)
                 except Fault as exc:
-                    if exc.code not in ("body_busy", "imu_invalid"):
+                    if exc.code not in ("body_busy", "imu_invalid", "servo_data_invalid"):
                         raise
             return self._body_telemetry()
         if op == "control.takeover":
@@ -316,6 +336,8 @@ class Body:
             return {}
         if op == "motion.slots":
             return page(self.slots, args)
+        if op == "motion.joints":
+            return page(self.body_servos.catalog, args)
         if op == "job.status":
             job = self.jobs.get(args.get("job_id"))
             if job is None:
@@ -328,6 +350,8 @@ class Body:
             self.engine = None
             self.servo_targets.clear()
             self.sent_targets.clear()
+            self.target_times.clear()
+            self.body_servos.invalidate("hard_stop")
             self.stabilizer.reset("hard_stop")
             try:
                 self.hardware.reset()
@@ -372,6 +396,7 @@ class Body:
             self.hardware.head(values, frames)
             self.servo_targets.update(((v.Id, v.Sio), v.Data) for v in values)
             self.sent_targets.update(((v.Id, v.Sio), v.Data) for v in values)
+            self.target_times.update(((v.Id, v.Sio), time.monotonic()) for v in values)
             self.head = {"pan": pan, "tilt": tilt}
             return {"accepted": True, "target": dict(self.head)}
         if op == "motion.drive":
@@ -512,6 +537,7 @@ class Body:
             self._publish_body_telemetry()
             return
         self._tick_body_imu()
+        self._tick_body_servos()
         if not self.body_connected:
             return
         if not self.plan:
@@ -554,6 +580,8 @@ class Body:
             self.engine = None
             self.servo_targets.clear()
             self.sent_targets.clear()
+            self.target_times.clear()
+            self.body_servos.invalidate("motion_fault")
             self.stabilizer.reset("motion_fault")
             self.error = str(exc)
             try:
@@ -571,6 +599,7 @@ class Body:
     def _body_telemetry(self):
         now = time.monotonic()
         return {"body.imu": self.body_imu.state(now),
+                "body.servos": self.body_servos.state(now),
                 "body.stabilization": self.stabilizer.state(self.parameters) | {
                     "source_mono_ns": int(now * 1e9), "valid": self.body_connected}}
 
@@ -624,6 +653,25 @@ class Body:
         # Relative trajectories start from nominal targets, never corrected ones.
         self.servo_targets.update(((v.Id, v.Sio), v.Data) for v in values)
         self.sent_targets.update(((v.Id, v.Sio), v.Data) for v in corrected)
+        self.target_times.update(((v.Id, v.Sio), time.monotonic()) for v in corrected)
+
+    def _tick_body_servos(self):
+        now = time.monotonic()
+        if (not self.body_connected
+                or not self.servo_watch
+                or now < self.body_servos.next_at
+                or (self.plan and now >= self.next_at)):
+            return
+        try:
+            self.body_servos.read(self)
+        except Fault as exc:
+            if exc.code == "servo_data_invalid":
+                if self.body_servos.invalid == 1 or self.body_servos.invalid % 25 == 0:
+                    self.log("WARNING", f"Body positions rejected: {exc}")
+            elif exc.code != "body_busy":
+                self._link_lost(exc)
+        except OSError as exc:
+            self._link_lost(exc)
 
     def _release_stabilization(self):
         # An absolute trajectory owns its next interpolated target. Do not send a
@@ -667,6 +715,7 @@ class Body:
             frames = max(1, math.ceil(BodyImu.PERIOD_S / self.hardware.frame_s))
             self.hardware.send(targets, frames, frames - 1)
             self.sent_targets.update(((v.Id, v.Sio), v.Data) for v in targets)
+            self.target_times.update(((v.Id, v.Sio), time.monotonic()) for v in targets)
             regulator.commit(proposed)
         except (Fault, OSError) as exc:
             if isinstance(exc, Fault) and exc.code == "body_busy":
@@ -683,6 +732,8 @@ class Body:
         self.engine = None
         self.servo_targets.clear()
         self.sent_targets.clear()
+        self.target_times.clear()
+        self.body_servos.invalidate("link_lost")
         self.body_imu.invalidate(str(exc)[:240])
         self.stabilizer.reset("link_lost")
         self.error = str(exc)[:240]
