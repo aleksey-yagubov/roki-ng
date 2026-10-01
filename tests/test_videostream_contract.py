@@ -179,6 +179,7 @@ def test_camera_controls_set_save_and_catalog_bounds(tmp_path):
 
 def test_camera_control_catalog_with_hardware_ranges():
     camera=Camera({},lambda *a:None,lambda *a:None)
+    camera.duration=16667  # camera.prepare sets this before opening libcamera.
     names=('ColourGains','ExposureTime','AnalogueGain','AeEnable','AwbEnable')
     camera.lc=NS(controls=NS(**{name:name for name in names}))
     camera.camera=NS(controls={
