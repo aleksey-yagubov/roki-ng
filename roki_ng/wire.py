@@ -32,7 +32,7 @@ def unpack(data, limit=UDP_LIMIT):
         raise Fault("too_large", "Datagram too large")
     try:
         value = msgpack.unpackb(data, raw=False, strict_map_key=True,
-                               max_array_len=256, max_map_len=128,
+                                max_array_len=256, max_map_len=512 if limit == IPC_LIMIT else 128,
                                max_str_len=limit, max_bin_len=limit, max_ext_len=0)
     except (ValueError, TypeError, msgpack.UnpackException) as exc:
         raise Fault("bad_message", "Invalid MessagePack") from exc

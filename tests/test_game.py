@@ -292,3 +292,12 @@ def test_stop_discards_game_start_waiting_for_parameter_lock(tmp_path):
         assert s.workers['motherboard'].calls == []
         assert not s.game.state()['running']
     asyncio.run(run())
+
+
+def test_full_parameter_snapshot_fits_worker_ipc(tmp_path):
+    from roki_ng.wire import IPC_LIMIT, pack, unpack
+    message = {'body': {'parameters': Parameters(tmp_path).values}}
+    assert unpack(pack(message, IPC_LIMIT), IPC_LIMIT) == message
+    # The larger internal map limit must not relax untrusted operator messages.
+    public = pack({'x': {str(i): 0 for i in range(129)}})
+    with pytest.raises(Fault, match='MessagePack'): unpack(public)
