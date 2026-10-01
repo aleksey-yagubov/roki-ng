@@ -66,7 +66,7 @@ class Channel:
 
     def has_subscribers(self):
         """Current demand, independent of whether any frames have been sent."""
-        return self.service.dynamic_config().number_of_subscribers() > 0
+        return self.service.dynamic_config.number_of_subscribers > 0
 
     def drain(self):
         self.listener.try_wait()

@@ -9,6 +9,25 @@ from roki_ng import dataplane, field_observations, localisation_debug, localisat
 from roki_ng.parameters import SCHEMA
 
 
+def test_real_iceoryx_subscriber_demand(monkeypatch):
+    pytest.importorskip('iceoryx2')
+    import uuid
+    topic = 'roki/test/demand/' + uuid.uuid4().hex
+    monkeypatch.setitem(dataplane.TOPICS, topic, (4, 64))
+    publisher = dataplane.Channel(topic, publisher=True)
+    subscriber = None
+    try:
+        assert not publisher.has_subscribers()
+        subscriber = dataplane.Channel(topic)
+        assert publisher.has_subscribers()
+        subscriber.close()
+        assert not publisher.has_subscribers()
+    finally:
+        if subscriber is not None:
+            subscriber.close()
+        publisher.close()
+
+
 def narrow_turf():
     image = np.full((650, 800, 3), 180, np.uint8)
     for x in range(20, 800, 80):
@@ -33,7 +52,11 @@ def test_clustering_checks_sample_count():
 def test_channel_checks_current_subscriber_count():
     channel = object.__new__(dataplane.Channel)
     count = [0]
-    channel.service = NS(dynamic_config=lambda: NS(number_of_subscribers=lambda: count[0]))
+    class Demand:
+        @property
+        def number_of_subscribers(self):
+            return count[0]
+    channel.service = NS(dynamic_config=Demand())
     for value in (0, 1, 2, 0, 1):
         count[0] = value
         assert channel.has_subscribers() is (value > 0)
