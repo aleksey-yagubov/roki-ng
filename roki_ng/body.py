@@ -793,7 +793,8 @@ class Body:
         if name == "base_stand":
             rows = json.loads((ASSETS / "slots/Initial_Pose.json").read_text())["Initial_Pose"]
             yield from self._slot(rows)
-            yield from self._head(0, 0)
+            # Re-enable the head at its last commanded target after a hard stop.
+            yield from self._head(self.head["pan"], self.head["tilt"])
         elif self.simulated:
             if name == "crouch":
                 _, values = self._crouch_target(False)

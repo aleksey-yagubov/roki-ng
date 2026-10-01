@@ -111,6 +111,29 @@ def test_stand_from_unknown_uses_base_pose(tmp_path):
     assert body.head == {"pan": 0, "tilt": 0}
 
 
+@pytest.mark.parametrize("pose", ["base_stand", "stand"])
+def test_base_pose_restores_commanded_head_after_hard_stop(tmp_path, pose):
+    body, _, _ = make_body(tmp_path)
+    target = {"pan": 350, "tilt": -1400}
+    body.command("motion.head", target)
+    for _ in range(2):
+        body.command("motion.stop_hard", {})
+        body.command("motion.pose", {"name": pose})
+        steps = list(body.plan)
+        head_values = [(v.Id, v.Sio, v.Data) for step in steps if step[0] == "servo"
+                       for v in step[1] if (v.Id, v.Sio) in ((0, 1), (12, 2))]
+        assert head_values == [(0, 1, 7850), (12, 2, 6100)]
+        assert body.state()["head"] == target
+
+
+def test_explicit_head_field_still_changes_head_target(tmp_path):
+    body, _, _ = make_body(tmp_path)
+    body.command("motion.head", {"pan": 350, "tilt": -1400})
+    body.command("motion.pose", {"name": "head_field"})
+    list(body.plan)
+    assert body.head == {"pan": 0, "tilt": body.parameters["head.field_tilt"]}
+
+
 def test_kinematics_fault_does_not_become_link_failure(tmp_path):
     body, events, _ = make_body(tmp_path)
     body.error = "No valid leg solution; movement stopped"
