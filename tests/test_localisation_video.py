@@ -5,12 +5,12 @@ from roki_ng.wire import Fault
 
 
 def test_localisation_stream_uses_bounded_shared_frames_not_camera():
-    spec=video_spec({'backend':'localisation'})
+    spec=video_spec({'source':'localisation'})
     pipeline=pipeline_description(spec)
     assert 'appsrc name=frames' in pipeline and 'libcamerasrc' not in pipeline
     assert 'width=800,height=650' in pipeline
-    with pytest.raises(Fault):video_spec({'backend':'localisation','sensor':{'width':1600}})
-    with pytest.raises(Fault):video_spec({'backend':'localisation','output':{'width':1600}})
+    with pytest.raises(Fault):video_spec({'source':'localisation','sensor':{'width':1600}})
+    with pytest.raises(Fault):video_spec({'source':'localisation','output':{'width':1600}})
 
 
 def test_annotation_is_frame_bound_and_does_not_modify_source():

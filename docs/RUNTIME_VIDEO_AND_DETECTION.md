@@ -4,6 +4,11 @@
 Тело отключено; ни один из этих тестов не отправляет движения.
 **RTP OSD не реализовывать**: пользователь будет менять его транспорт.
 
+Команды в примерах обновлены 01.10.2026. Текущий полный контракт:
+[CAMERA_VIDEOSTREAM_PROTOCOL.md](CAMERA_VIDEOSTREAM_PROTOCOL.md).
+Замеры ниже относятся к версии на дату измерения, не являются проверкой
+нового многопользовательского API на железе.
+
 ## Что работает
 
 Пять процессов: supervisor, motherboard, camera, stream, detection. При старте
@@ -14,15 +19,17 @@ Camera-worker владеет libcamera и публикует полный FOV 16
 уменьшенный ISP до 800x650 BGR. Его запуск/синхронизация IMU описаны отдельно
 в [CAMERA_IMU_CAPTURE.md](CAMERA_IMU_CAPTURE.md).
 
-Stream-worker умеет два backend:
+Пути видео, проверенные в этом отчёте:
 
 - direct-gst: libcamerasrc самостоятельно захватывает видео; IMU не нужен.
 - runtime: читает уже запущенный camera-worker через shared memory. Pipeline:
   appsrc BGR -> bounded queue -> v4l2convert -> I420 -> v4l2jpegenc/v4l2h264enc
-  -> RTP payloader -> udpsink. Parse-элементов на отправителе нет.
+  -> RTP payloader -> multiudpsink. Parse-элементов на отправителе нет.
 
-Runtime video.start не меняет сенсор, exposure/gain или захват IMU.
-Video.stop закрывает только encoder/subscriber. Camera.stop сначала закрывает
+Также теперь доступен source=localisation, см. [LOCALISATION_VIDEO.md](LOCALISATION_VIDEO.md).
+
+Runtime videostream.start не меняет сенсор, exposure/gain или захват IMU.
+Videostream.stop закрывает только encoder/subscriber. Camera.stop сначала закрывает
 runtime-видео и детектор, затем libcamera и IMU capture. Повторный запуск видео
 не требует заново привязывать Unicam/STM.
 
@@ -69,15 +76,15 @@ Unicam sequence. Будущая локализация должна связат
 После control.acquire и mode.set(MANUAL):
 
 ```text
-camera.start {"with_imu":true}
+camera.start {}
 detection.list {}
 detection.start {"profile":"orange_ball"}
 params.keys {"prefix":"vision.orange_ball."}
 params.set {"key":"vision.orange_ball.pixels_min","value":100}
 data.subscribe {"topic":"detection.state","rate_hz":2}
-video.create {"backend":"runtime","codec":{"name":"jpeg"},"output":{"width":800,"height":648,"fps":30},"destination":{"rtp_port":5004}}
-video.start {"stream_id":"ID ИЗ ОТВЕТА"}
-video.stop {"stream_id":"ID ИЗ ОТВЕТА"}
+videostream.create {"source":"runtime","codec":{"name":"jpeg"},"output":{"width":800,"height":648,"fps":30}}
+videostream.start {"stream_id":"ID ИЗ ОТВЕТА","rtp_port":5004}
+videostream.stop {"stream_id":"ID ИЗ ОТВЕТА"}
 detection.stop {}
 camera.stop {}
 ```
@@ -86,8 +93,10 @@ Reference Client добавляет lease_epoch. Начальные пороги
 калибровки конкретного робота: их нужно настроить на поле. Пользовательские
 параметры сохраняются только в state-dir, не в репозитории.
 
-Runtime FPS задаёт верхнюю частоту видео: лишние кадры пропускаются. Нельзя
-запросить больше частоты работающей камеры. Выход не больше 800x650. Для JPEG
+Runtime max_fps задаёт верхнюю частоту видео: лишние кадры пропускаются до
+копирования. Его можно менять через videostream.update без перезапуска, в
+пределах output.fps. На start нельзя запросить больше частоты работающей камеры.
+Выход не больше 800x650. Для JPEG
 размер должен быть кратен 8, поэтому проверен 800x648; H.264 проверен 800x650.
 GStreamer может задавать pixel-aspect-ratio при масштабировании; оператору
 следует учитывать negotiated caps. Сенсор при этом не переключается и FOV не

@@ -69,7 +69,7 @@ workers, direct-gst, протокол, параметры и reference client. �
   независимые cursors/eventfd consumers.
 - Реализовать отдельный stream-worker для encoder-ов, RTP и обработки
   GStreamer `ERROR`/`EOS`.
-- Реализовать `video.capabilities/create/start/update/stop/destroy`.
+- Реализовать `videostream.capabilities/create/start/update/stop/destroy`.
 - Поддержать backend-ы direct GStreamer и runtime без одновременного владения
   камерой.
 - Проверить, что ручной `direct-gst/libcamerasrc` не управляет strobe drain и

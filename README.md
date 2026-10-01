@@ -20,6 +20,8 @@ Runtime-захват libcamera и IMU передаются через iceoryx2, 
 Старые сервер/клиент с этим протоколом несовместимы.
 
 Точный API для нового клиента: [OPERATOR_PROTOCOL_V1.md](docs/OPERATOR_PROTOCOL_V1.md).
+Камера и передачи: [CAMERA_VIDEOSTREAM_PROTOCOL.md](docs/CAMERA_VIDEOSTREAM_PROTOCOL.md).
+Для GUI-агента: [GUI_CAMERA_VIDEOSTREAM_HANDOFF.md](docs/GUI_CAMERA_VIDEOSTREAM_HANDOFF.md).
 Архитектура следующих этапов: [`docs`](docs/README.md).
 
 ## Проверка на ПК
@@ -61,11 +63,11 @@ Client автоматически добавляет lease_epoch, поддерж
 создания JPEG stream, затем start с полученным ID:
 
 ```text
-video.create {"codec":{"name":"jpeg"},"output":{"width":800,"height":648,"fps":30},"destination":{"rtp_port":5004}}
-video.start {"stream_id":"ID ИЗ ОТВЕТА"}
+videostream.create {"source":"direct-gst","codec":{"name":"jpeg"},"output":{"width":800,"height":648,"fps":30}}
+videostream.start {"stream_id":"ID ИЗ ОТВЕТА","rtp_port":5004}
 ```
 
-Для этого теста нужны GI/GStreamer, jpegenc/rtpjpegpay/udpsink и
+Для этого теста нужны GI/GStreamer, jpegenc/rtpjpegpay/multiudpsink и
 videoconvert. Обычный `--simulate` не требует GI, Roki или starkit и не передаёт
 настоящего видео.
 
@@ -97,24 +99,29 @@ product `Roki motherboard`, и сохраняет соединение до вы
 `--skip-mixing`. Он не запускает mixing, но не останавливает уже работающий слот.
 Это диагностический режим, без гарантии стабилизации, которую обеспечивает mixing.
 
-Прямой GStreamer-захват включается по video.start. Default: полный sensor 1600x1300 RAW10,
+Прямой GStreamer-захват включается по videostream.start для source=direct-gst. Default: полный sensor 1600x1300 RAW10,
 processed stream 800x650@60, аппаратный H.264 2 Mbit/s. Протокол позволяет выбрать
 другие размеры/частоту и JPEG. Аппаратную поддержку запроса окончательно проверяет
 GStreamer; ошибки возвращаются оператору.
 
 Отдельный `camera.start` запускает runtime-захват **1600x1300 RAW10 -> 800x650 BGR**
-в shared memory; по умолчанию с IMU. Только direct-gst video.start
+в shared memory, обязательно с IMU. Только direct-gst videostream.start
 взаимоисключается с runtime-камерой.
 При старте выполняется автоматическая привязка Unicam/STM по восьми парам меток;
 пиксели доступны сразу, точное сопоставление с IMU разрешено только после
-`camera.synchronized`. Запуск с `with_imu:false` не включает захват стробов.
+`camera.synchronized`. Режим без синхронной IMU доступен только через direct-gst.
 Контракт и проверки: [CAMERA_IMU_CAPTURE.md](docs/CAMERA_IMU_CAPTURE.md).
 
-После camera.start можно запросить video.create с backend=runtime и video.start:
+После camera.start можно запросить videostream.create с source=runtime и videostream.start:
 это отправка той же камеры через JPEG/H.264 без повторного захвата. Остановка
 видео не останавливает камеру/IMU. Detection.start включает LAB connected
 components, параметры vision.* применяются со следующего кадра. Это пока
 цветовые кандидаты, не классификация мяча и не локализация на поле.
+Все сессии могут подключаться к уже работающей передаче через videostream.attach.
+Один кодировщик обслуживает несколько адресов; последний detach/истечение сессии
+останавливает передачу, но не runtime-захват и вычислители. Запуском и настройками
+управляет текущий владелец control lease. Каталог videostream.sources включает
+недоступные источники, а videostream.list показывает созданные определения.
 Реализованные команды и ограничения:
 [RUNTIME_VIDEO_AND_DETECTION.md](docs/RUNTIME_VIDEO_AND_DETECTION.md).
 OSD согласован через MessagePack; в RTP планируется только UnicamSequence

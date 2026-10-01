@@ -78,8 +78,10 @@ STM. При synced доступны unicam_minus_stm, pairs, max_residual_ns,
 clock_uncertainty_ns. Остаток timestamp — диагностическая оценка привязки,
 не измерение абсолютной точности ориентации IMU.
 
-`with_imu:false` явно выключает строб/IMU stream. Direct-gst также не включает
-их. Остановка camera-worker сопровождается StopStrobeCapture; это выключает
+Runtime camera.start теперь всегда включает синхронную IMU; параметр with_imu
+удалён. Direct-gst не включает строб/IMU stream. Полный текущий контракт:
+[CAMERA_VIDEOSTREAM_PROTOCOL.md](CAMERA_VIDEOSTREAM_PROTOCOL.md).
+Остановка camera-worker сопровождается StopStrobeCapture; это выключает
 stream и очищает историю STM. Сам сенсор IMU продолжает измерения.
 Ошибка ACM или переполнение нативной очереди вызывает остановку синхронного
 захвата. Ошибка отсутствующего тела этого не делает.
@@ -91,7 +93,6 @@ stream и очищает историю STM. Сам сенсор IMU продо�
 ```sh
 python3 tools/check_camera_imu.py
 python3 tools/check_camera_imu.py --30fps
-python3 tools/check_camera_imu.py --camera-only
 python3 tools/check_camera_imu.py --probe-body
 ```
 
@@ -102,7 +103,9 @@ python3 tools/check_camera_imu.py --probe-body
 - 60 FPS: смещения 5 и 4, соответственно 478 и 479 точных пар.
 - 30 FPS: смещение 2, по 239 точных пар в обоих запусках. Первые две невалидные IMU из-за
   стартового периода сенсора пропускаются, не подменяются нулевыми измерениями.
-- Camera-only: 480 кадров в каждом окне, IMU-записей 0.
+- Исторический camera-only тест: 480 кадров в каждом окне, IMU-записей 0.
+  Этот режим удалён из runtime API и проверочного скрипта; результат относится
+  к версии на дату замеров, а не к текущему контракту.
 - С probes отсутствующего тела: смещения 5 и 4, 479 и 478 пар. Состояние
   motherboard degraded, ошибка BodyTimeout; поток IMU продолжает работать.
 - Во всех этих окнах unmatched_evicted=0. Различие количества кадров и IMU

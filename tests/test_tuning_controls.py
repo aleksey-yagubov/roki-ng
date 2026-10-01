@@ -36,16 +36,18 @@ def test_lab_batch_is_atomic_and_conflict_checked(tmp_path):
 
 
 @pytest.mark.parametrize('age,running,good',[(10,True,True),(1001,True,False),(10,False,False),(None,True,False)])
-def test_freeze_requires_fresh_metadata_and_saves_atomically(tmp_path,age,running,good):
+def test_freeze_requires_fresh_metadata_without_implicit_save(tmp_path,age,running,good):
     async def run():
         s=server(tmp_path,{'running':running,'measured_age_ms':age,
             'measured_controls':{'sequence':77,'exposure_us':7000,'gain':2.,'colour_gains':[1.2,2.6]}})
         if good:
             result=await s.dispatch(None,'camera.controls.freeze',{'group':'all'})
             assert result['source_sequence']==77
-            assert s.params.values['camera.exposure_us']==7000
-            assert s.params.values['camera.awb_enabled'] is False
-            assert s.params.values['camera.white_balance.blue_gain']==2.6
+            assert result['values']['camera.exposure_us']==7000
+            assert result['values']['camera.awb_enabled'] is False
+            assert result['values']['camera.white_balance.blue_gain']==2.6
+            assert result['saved'] is False
+            assert Parameters(tmp_path).values['camera.exposure_us']==8000
         else:
             with pytest.raises(Fault,match='Fresh'):
                 await s.dispatch(None,'camera.controls.freeze',{'group':'all'})
@@ -172,7 +174,7 @@ def test_live_localisation_rejection_still_rolls_back_detector(tmp_path, error):
     ({'frame_duration_us': 33333}, 'restart_required'),
     ({'exposure_us': 9000}, 'restart_required'),
     ({'gain': 2.0}, 'restart_required'),
-    ({'with_imu': False}, 'restart_required'),
+    ({'with_imu': False}, 'invalid_argument'),
     ({'frame_duration_us': 0}, 'invalid_argument'),
     ({'exposure_us': 20000}, 'invalid_argument'),
 ])
@@ -190,5 +192,8 @@ def test_running_camera_start_checks_requested_settings(tmp_path, settings, code
             assert caught.value.code == code
         else:
             assert await s.dispatch(None, 'camera.start', settings) == state
-        s.workers['camera'].call.assert_awaited_once_with('camera.status')
+        if 'with_imu' in settings:
+            s.workers['camera'].call.assert_not_awaited()
+        else:
+            s.workers['camera'].call.assert_awaited_once_with('camera.status')
     asyncio.run(run())

@@ -35,7 +35,7 @@ control port, настроенный на обеих сторонах; нача�
   "id": 64-битный ID запроса или 0,
   "sequence": 64-битный sequence события/потока или 0,
   "robot_mono_ns": monotonic timestamp робота или 0,
-  "op": "video.create",
+  "op": "videostream.create",
   "body": {...}
 }
 ```
@@ -112,9 +112,9 @@ Token защищает от случайного смешения сессий, 
 защищённая сеть.
 
 Клиент отправляет `session.heartbeat` с согласованным интервалом. Истечение
-сессии освобождает её управляющую lease и останавливает только созданные ей
-ресурсы: видеокодеры оператора и подписки на datastream. Автономная игра
-не останавливается.
+сессии освобождает её управляющую lease, подписки на datastream и видеополучателей.
+Общий видеокодер продолжает работать для остальных; без получателей он
+останавливается. Автономная игра не останавливается.
 
 ## Гарантии доставки
 
@@ -151,8 +151,9 @@ state machine решает, допустима ли команда сейчас.
 - `mode.*`: idle, manual, calibration, game, pause и recovery;
 - `motion.*`: drive, head, pose, slot, graceful stop и hard stop;
 - `game.*`: role, side, start pose, start, pause, continue и target override;
-- `camera.*`: capabilities sensor/output и текущий owner/state;
-- `video.*`: create, start, update, stop и destroy encoded streams;
+- `camera.*`: runtime-захват с IMU, status/capabilities и controls ISP;
+- `videostream.*`: sources/list/capabilities, create/start/update/stop/destroy,
+  status и attach/detach видеополучателей;
 - `data.*`: список topics, subscribe, update, unsubscribe и snapshot;
 - `osd.*`: каталог video OSD layers и subscriptions;
 - `servo.*`: inventory, telemetry, recovery и guarded parameters;
@@ -275,83 +276,55 @@ topics и не требует видеопотока или OSD.
 
 ## Жизненный цикл видео
 
-Видео не запускается от `hello`, `camera.capabilities`, входа в manual mode
-или подписки на telemetry.
+Реализованный контракт, а не предварительный эскиз:
+[CAMERA_VIDEOSTREAM_PROTOCOL.md](CAMERA_VIDEOSTREAM_PROTOCOL.md).
+Все операции передач называются `videostream.*`; `camera.*` относится
+исключительно к runtime camera-worker и ISP. Старые `video.*` удалены.
 
-Жизненный цикл состоит из двух фаз:
+1. Оператор явно запрашивает videostream.sources. В каталоге есть и недоступные
+   источники с причиной. Каталог не запускает камеру или вычислительные воркеры.
+2. Для runtime сначала запускается camera.start: полный sensor 1600x1300 RAW10,
+   ISP 800x650 BGR, обязательная привязка IMU. Для localisation отдельно нужен
+   localisation.start. Direct-gst вместо этого захватывает камеру внутри stream-worker.
+3. Videostream.create создаёт определение с source, output, codec, max_fps и mtu.
+   Destination не передаётся. Это ещё не encoder и не публикация debug-изображений.
+4. Клиент подготавливает receiver и вызывает videostream.start с stream_id
+   и rtp_port. IP берётся из сессии. Получатель добавляется вместе с запуском.
+5. Остальные сессии вызывают attach с портом: один encoder/payloader обслуживает
+   все адреса через multiudpsink. Несколько окон GUI не требуют новых attach.
+6. Detach удаляет только получателя текущей сессии. Последний получатель ушёл:
+   encoder закрывается, дополнительный видеовыход производителя выключается,
+   но сам вычислительный worker продолжает работу.
+7. Stop владельца управления выключает передачу для всех, сохраняя определение.
+   Destroy удаляет определение. List показывает созданные, включая stopped.
+   Status возвращает RTP-параметры, счётчики, receivers и состояние.
 
-1. `video.create` проверяет параметры, создаёт stream ID и возвращает
-   применённые RTP caps, не начиная capture и передачу.
-2. Оператор создаёт и переводит receiving pipeline в PAUSED.
-3. `video.start` при необходимости запускает camera/backend и начинает RTP.
-4. `video.update` изменяет поддерживаемые live properties, например bitrate.
-5. `video.stop` прекращает передачу, сохраняя определение stream.
-6. `video.destroy` освобождает encoder и ресурсы сессии.
+Создание/start/update/stop/destroy требуют текущую control lease; отдельного
+владельца у передачи нет. Наблюдатели имеют право на attach/detach без lease.
+Завершение сессии удаляет только её получателей. Потеря control lease не
+прекращает просмотр, а отключение оператора не прекращает автономную работу.
 
-Пример `video.create`:
+Camera-worker и direct-gst не могут владеть камерой одновременно. Конфликт
+возвращает ошибку, не останавливает существующего владельца автоматически.
+Direct-gst не использует синхронную IMU; последний detach освобождает его камеру.
+Camera.stop явно останавливает зависимые алгоритмы и передачи, затем IMU/capture.
 
-```text
-{
-  "backend": "runtime" | "direct-gst" | "auto",
-  "sensor": {
-    "mode_id": "1600x1300-RG10",
-    "fps": 0
-  },
-  "output": {
-    "width": 800,
-    "height": 650,
-    "fps": 0
-  },
-  "codec": {
-    "name": "h264" | "jpeg",
-    "bitrate": 2000000,
-    "profile": "baseline",
-    "keyframe_interval": 30
-  },
-  "destination": {
-    "rtp_port": 5004,
-    "rtcp_port": 5005
-  }
-}
-```
+Для runtime/localisation live max_fps ограничивает копирование и кодирование,
+не меняет частоту источника. Его предел задаётся output.fps при create;
+runtime допускает меньшую частоту и не повторяет кадры. Для direct-gst частота
+задаётся output.fps в capture caps, live max_fps отсутствует.
+H.264 bitrate обновляется только у остановленной передачи; codec/size/source
+требуют пересоздания. Несколько H.264 передач разрешены в пределах ресурсов.
 
-По умолчанию destination IP совпадает с source IP сессии и не может быть
-изменён, чтобы робот не стал источником UDP reflection.
+Stream_id сохраняется до destroy/рестарта stream-worker; run_id и SSRC
+обновляются при каждом новом start. События started/stopped/failed дополняют
+status/list, но не заменяют их, поскольку UDP-событие может потеряться.
+Camera.state описывает camera-worker; videostream.state описывает передачи.
 
-`direct-gst` использует `libcamerasrc` для ручного наблюдения, когда
-автономному коду не нужны пиксели. `runtime` кодирует кадры работающего
-libcamera runtime и сохраняет frame identity, используемый detection и
-localization. GStreamer pipelines обоих backend-ов принадлежат stream-worker;
-camera-worker владеет камерой только в runtime backend.
-
-`direct-gst` не использует frame-synchronised IMU и не управляет strobe drain
-ради видеопотока. Это backend только для ручного управления и наблюдения:
-обычные движения продолжают работать, а независимый IMU datastream запускается
-только по явной подписке и по умолчанию неактивен. Detection, localization и
-точный OSD для этого видео недоступны.
-
-Bitrate можно менять live. Изменение codec format или dimensions может
-перезапустить только encoder. Смена sensor mode или camera backend закрывает
-старые video streams и создаёт новые stream IDs. При входе в `runtime`
-camera-derived rings создаются заново, а camera/STM counters и strobe
-containers согласованно сбрасываются. Запуск `direct-gst` не требует
-синхронизации с IMU. Ответ всегда сообщает применённые настройки и
-перезапущенные ресурсы.
-
-Каждый работающий video stream сообщает:
-
-- stream ID, RTP SSRC, payload type и clock rate;
-- codec caps для receiving pipeline;
-- output dimensions и измеренный frame rate;
-- URI/ID RTP header extension с 32-битным `UnicamSequence`;
-- доступные MessagePack OSD layers, если OSD поддерживается;
-- `video_stream_id` и преобразование source/output;
-- счётчики packets, frames и drops;
-- доступность точной синхронизации OSD.
-
-H.264 настраивается на low latency без B-frame reordering. RTCP при наличии
-используется для receiver reports и диагностики, но управление остаётся в
-MessagePack.
+Текущие ограничения: exact_osd=false, rtcp=false. URI/ID UnicamSequence
+extension, новый MessagePack OSD, JPEG quality и lossless threshold transport
+этим этапом не реализованы. Не выдавать запрошенные настройки кодека за
+фактически измеренные параметры; для этого есть negotiated_caps и actual_fps.
 
 ## OSD
 

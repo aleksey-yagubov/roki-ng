@@ -113,17 +113,16 @@ def server_setup(tmp_path, fail_start=False):
     return server, calls, Session(1,1,("127.0.0.1",9999),"test")
 
 
-@pytest.mark.parametrize("with_imu", [True, False])
-def test_supervisor_orders_capture_and_excludes_gst(tmp_path, with_imu):
+def test_supervisor_orders_capture_and_excludes_gst(tmp_path):
     async def run():
         server, calls, session = server_setup(tmp_path)
-        await server.dispatch(session, "camera.start", {"lease_epoch":1,"with_imu":with_imu})
-        assert calls == ["camera.status","camera.prepare","imu.start" if with_imu else "imu.stop","camera.start"]
+        await server.dispatch(session, "camera.start", {"lease_epoch":1})
+        assert calls == ["camera.status","camera.prepare","imu.start","camera.start"]
         calls.clear()
         await server.dispatch(session,"camera.stop",{"lease_epoch":1})
         assert calls == ["camera.stop","imu.stop"]
         assert server.capture_session is None
-        server.workers["stream"].call.return_value = {"active_streams":[{"stream_id":"test","backend":"direct-gst"}]}
+        server.workers["stream"].call.return_value = {"active_streams":[{"stream_id":"test","source":"direct-gst"}]}
         with pytest.raises(Fault, match="direct-gst"):
             await server.dispatch(session,"camera.start",{"lease_epoch":1})
     asyncio.run(run())
@@ -273,8 +272,8 @@ def test_start_existing_synchronized_camera_does_not_interrupt_video(tmp_path):
                'requested_controls':{'exposure_us':8000,'gain':1.0},
                'imu_sync':{'state':'synced'}}
         server.workers['camera'].call=AsyncMock(return_value=state)
-        server.workers['stream'].call.return_value={'active_streams':[{'backend':'runtime','stream_id':'main'}]}
-        assert await server.dispatch(session,'camera.start',{'lease_epoch':1,'with_imu':True})==state
+        server.workers['stream'].call.return_value={'active_streams':[{'source':'runtime','stream_id':'main'}]}
+        assert await server.dispatch(session,'camera.start',{'lease_epoch':1})==state
         assert [c.args[0] for c in server.workers['camera'].call.call_args_list]==['camera.status']
         assert not calls
     asyncio.run(run())

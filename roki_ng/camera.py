@@ -10,7 +10,7 @@ import struct
 import time
 
 from .dataplane import Channel, FRAME_TOPIC, FRAME_HEADER, FRAME_BYTES
-from .wire import Fault, number, boolean
+from .wire import Fault, number, boolean, page
 from .synchronization import CaptureAlignment
 
 WB_KEYS = ("camera.white_balance.red_gain", "camera.white_balance.blue_gain")
@@ -62,6 +62,33 @@ class Camera:
                 "measured_age_ms":round((time.monotonic()-self.last_frame)*1000) if self.running and self.measured else None}
 
     def command(self, op, args):
+        if op == 'camera.capabilities':
+            return {'sensor':{'width':1600,'height':1300,'depth':10},
+                    'output':{'width':800,'height':650,'format':'BGR'},
+                    'geometry_mutable':False, 'imu_required':True,
+                    'frame_duration_us':{'min':8333,'max':100000,'default':16667,'apply':'next_start'},
+                    'controls_probed':self.camera is not None}
+        if op == 'camera.controls.list':
+            from .parameters import SCHEMA
+            values = dict(zip(WB_KEYS, self.white_balance)) | {
+                'camera.exposure_us':self.exposure, 'camera.analogue_gain':self.gain,
+                'camera.ae_enabled':self.ae, 'camera.awb_enabled':self.awb}
+            items = []
+            for key,value in values.items():
+                kind,default,low,high,_,description = SCHEMA[key]
+                supported = None
+                if self.camera is not None:
+                    control = getattr(self.lc.controls, CONTROL_KEYS.get(key, 'ColourGains'))
+                    info = self.camera.controls.get(control)
+                    supported = info is not None
+                    if info is not None and kind != 'bool':
+                        low, high = max(low, info.min), min(high, info.max)
+                    if key == 'camera.exposure_us':
+                        high = min(high, self.duration)
+                items.append({'key':key,'type':kind,'default':default,'min':low,'max':high,
+                              'value':value,'supported':supported,'apply':'next_request',
+                              'description':description})
+            return page(items, args, 2)
         if op == "params.apply":
             if any(key not in WB_KEYS and key not in CONTROL_KEYS for key in args):
                 raise Fault("invalid_argument", "Unknown camera parameter")
@@ -124,7 +151,9 @@ class Camera:
             if self.camera is None or self.running:
                 raise Fault("invalid_state", "Prepare camera before start")
             try:
-                self.alignment = CaptureAlignment(args["clock"], self.duration) if args.get("clock") else None
+                if not args.get('clock'):
+                    raise Fault('not_ready', 'Synchronized capture requires motherboard clock')
+                self.alignment = CaptureAlignment(args["clock"], self.duration)
                 self.synced = False
                 c = self.lc.controls
                 self.camera.start({c.AeEnable: self.ae, c.AwbEnable: self.awb,

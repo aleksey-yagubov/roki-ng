@@ -28,6 +28,9 @@ class Localisation:
         self.video_error = None
         self.reported_error = None
         self.reported_video_error = None
+        self.video_requested = threading.Event()
+        self.video_frames = 0
+        self.video_last_frame = 0.0
 
     def state(self):
         result=dict(self.result) if self.result else None
@@ -42,6 +45,24 @@ class Localisation:
                 'configuration_id':self.configuration_id,'geometry':self.geometry}
 
     def command(self, op, args):
+        if op in ('source.start', 'source.stop', 'source.status'):
+            if args.get('source') != 'localisation':
+                raise Fault('not_found', 'Unknown video source')
+            if op == 'source.start':
+                if args.get('parameters', {}) != {}:
+                    raise Fault('invalid_argument', 'No source parameters supported')
+                if not self.thread or not self.thread.is_alive() or self.error:
+                    raise Fault('not_ready', 'Start localisation first')
+                if self.video_error:
+                    raise Fault('source_fault', 'Diagnostic output failed; restart localisation')
+                self.video_requested.set()
+            elif op == 'source.stop':
+                self.video_requested.clear()
+            return {'requested': self.video_requested.is_set(), 'frames': self.video_frames,
+                    'publishing': self.video_requested.is_set() and self.video_error is None
+                        and time.monotonic() - self.video_last_frame < 2,
+                    'age_ms': round((time.monotonic()-self.video_last_frame)*1000) if self.video_frames else None,
+                    'error': self.video_error}
         if op=='params.apply':
             from .parameters import validate_colour_ranges
             updated=self.parameters | args
@@ -81,6 +102,9 @@ class Localisation:
         self.result=self.error=None
         self.video_error = self.reported_error = self.reported_video_error = None
         self.frames=self.dropped=0
+        self.video_frames = 0
+        self.video_last_frame = 0.0
+        self.video_requested.clear()
         self.capture_id=args['capture_id']
         self.configuration_id=configuration
         self.geometry=dict(self.parameters['field.geometry'])
@@ -174,7 +198,7 @@ class Localisation:
                 if self.stop_event.is_set() or self.generation!=generation:break
                 if revision!=self.parameter_revision:continue
                 self.result=result;self.last_measurement=received;self.frames+=1
-                if self.video_error is None:
+                if self.video_requested.is_set() and self.video_error is None:
                     try:
                         if debug_channel is None:
                             debug_channel=Channel(LOCALISATION_TOPIC,publisher=True)
@@ -183,10 +207,12 @@ class Localisation:
                             from .localisation_debug import video_frame
                             annotated=video_frame(image,projector,imu[2:6],lines,circle,posts,result,engine.model,engine.circles)
                             if self.stop_event.is_set() or self.generation!=generation:break
-                            if debug_channel.has_subscribers():
+                            if self.video_requested.is_set() and debug_channel.has_subscribers():
                                 with debug_channel.loan(FRAME_BYTES) as target:
                                     FRAME_HEADER.pack_into(target,0,*header)
                                     target[FRAME_HEADER.size:]=annotated.tobytes()
+                                self.video_frames += 1
+                                self.video_last_frame = time.monotonic()
                     except Exception as exc:
                         # A failed diagnostic sink must not stop pose estimation.
                         # Disable it until the next localisation.start, without a retry loop.
@@ -211,6 +237,7 @@ class Localisation:
             self.reported_video_error = self.video_error
 
     def close(self):
+        self.video_requested.clear()
         self.generation+=1
         self.stop_event.set()
         self.result=None

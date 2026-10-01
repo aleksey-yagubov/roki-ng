@@ -17,14 +17,16 @@ from .wire import Fault, UDP_LIMIT, envelope, number, boolean, pack, page, udp_s
 OPS = (
     "localisation.start", "localisation.stop", "localisation.status",
     "camera.start", "camera.stop", "camera.status", "camera.controls.freeze",
+    "camera.controls.list", "camera.controls.set", "camera.controls.save",
     "detection.list", "detection.start", "detection.stop", "detection.status",
     "session.heartbeat", "session.close", "system.status", "system.capabilities", "system.operations",
     "system.restart_stream_worker", "control.acquire", "control.release", "mode.set",
     "motion.drive", "motion.head", "motion.pose", "motion.jump", "motion.kick", "motion.slot",
     "motion.get_up", "motion.splits",
     "motion.slots", "motion.joints", "motion.stop_graceful", "motion.stop_hard", "job.status", "job.cancel",
-    "test.list", "test.describe", "test.start", "test.measure", "camera.capabilities", "video.capabilities", "video.create",
-    "video.start", "video.status", "video.update", "video.stop", "video.destroy",
+    "test.list", "test.describe", "test.start", "test.measure", "camera.capabilities", "videostream.capabilities", "videostream.create",
+    "videostream.start", "videostream.status", "videostream.update", "videostream.stop", "videostream.destroy",
+    "videostream.sources", "videostream.list", "videostream.attach", "videostream.detach",
     "params.keys", "params.describe", "params.get", "params.set",
     "data.list", "data.snapshot", "data.subscribe", "data.update", "data.unsubscribe",
     "log.sources", "log.snapshot", "log.subscribe", "log.update", "log.unsubscribe",
@@ -32,13 +34,15 @@ OPS = (
 READ_ONLY = {
     "localisation.status",
     "camera.status",
+    "camera.controls.list", "videostream.sources", "videostream.list", "videostream.status",
+    "videostream.attach", "videostream.detach",
     "detection.list", "detection.status",
-    "motion.slots", "motion.joints", "test.list", "test.describe", "job.status", "camera.capabilities", "video.capabilities",
+    "motion.slots", "motion.joints", "test.list", "test.describe", "job.status", "camera.capabilities", "videostream.capabilities",
     "params.keys", "params.describe", "params.get", "system.status", "system.capabilities",
     "system.operations", "session.heartbeat", "session.close",
 }
 BODY_TOPICS = ("body.imu", "body.stabilization", "body.servos")
-TOPICS = ("system.workers", "motion.state", "camera.state", "detection.state", "localisation.state", *BODY_TOPICS)
+TOPICS = ("system.workers", "motion.state", "camera.state", "videostream.state", "detection.state", "localisation.state", *BODY_TOPICS)
 LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
 REQUEST_WINDOW = 128
 
@@ -55,7 +59,6 @@ class Session:
     sequence: int = 0
     cache: dict = field(default_factory=collections.OrderedDict)
     pending: dict = field(default_factory=dict)
-    streams: set = field(default_factory=set)
     data: dict = field(default_factory=dict)
     logs: dict | None = None
     closed: bool = False
@@ -181,6 +184,9 @@ class Supervisor:
         await self._release(self.local_session)
 
     def worker_event(self, role, op, body):
+        if not self.closing and ((role == 'stream' and op in ('videostream.failed', 'videostream.stopped', 'worker.fault'))
+                                 or (role == 'localisation' and op in ('localisation.fault', 'worker.fault'))):
+            self.spawn(self._video_fault(role, op))
         if role == "motherboard" and op == "body.telemetry":
             self.body_telemetry = body
             return  # Only requested datastreams, never unsolicited operator events.
@@ -215,8 +221,6 @@ class Supervisor:
                 if owner:
                     self.spawn(self._release(owner))
         for session in list(self.sessions.values()):
-            if op.startswith("video.") and body.get("stream_id") not in session.streams:
-                continue
             if op.startswith("job.") and session.id != self.owner:
                 continue
             self.send(session, "event", op, body)
@@ -481,8 +485,22 @@ class Supervisor:
             key = body.get("key")
             meta = self.params.describe(key)
             return meta if op.endswith("describe") else {"key": key, "value": self.params.values[key]}
-        if op not in READ_ONLY and op not in ("video.status", "video.stop", "video.destroy"):
+        if op not in READ_ONLY:
             self.require_control(session, body)
+        if op == 'camera.controls.list':
+            return await self.workers['camera'].call(op, body)
+        if op in ('camera.controls.set', 'camera.controls.save'):
+            from .camera import CONTROL_KEYS, WB_KEYS
+            values = body.get('values')
+            if not isinstance(values, dict) or not values or set(values) - (set(CONTROL_KEYS) | set(WB_KEYS)):
+                raise Fault('invalid_argument', 'Provide camera control values using camera.* keys')
+            if op.endswith('.save'):
+                return {'values': await self._set_parameters(values), 'saved': True}
+            async with self.parameter_lock:
+                values = {key:self.params.validate(key,value) for key,value in values.items()}
+                self.require_control(session, body)
+                await self.workers['camera'].call('params.apply', values)
+                return {'values': values, 'saved': False}
         if op == "params.set":
             if "values" in body:
                 values, expected = body["values"], body.get("expected_values")
@@ -520,7 +538,10 @@ class Supervisor:
                         raise Fault('not_ready','ColourGains metadata unavailable')
                     values.update({'camera.awb_enabled':False,'camera.white_balance.red_gain':gains[0],
                                    'camera.white_balance.blue_gain':gains[1]})
-                return {'values':await self._set_parameters(values),'source_sequence':measured['sequence']}
+                async with self.parameter_lock:
+                    values = {key:self.params.validate(key,value) for key,value in values.items()}
+                    await self.workers['camera'].call('params.apply', values)
+                return {'values':values,'saved':False,'source_sequence':measured['sequence']}
         if op == "test.measure":
             job = await self.workers["motherboard"].call("job.status", {"job_id": body.get("job_id")})
             if job["operation"] != "test.start" or job["status"] != "completed":
@@ -544,8 +565,8 @@ class Supervisor:
             # An intentional exit is not a loss-of-control fault.
             old_worker.event = lambda *_: None
             await old_worker.close()
-            for s in self.sessions.values():
-                s.streams.clear()
+            async with self.capture_lock:
+                await self._sync_video_sources(force_off=True)
             worker = WorkerPeer("stream", self.config, self.worker_event, self.log)
             self.workers["stream"] = worker
             await worker.start()
@@ -575,7 +596,7 @@ class Supervisor:
             async with self.capture_lock:
                 self.require_control(session, body)
                 if op == "localisation.stop":
-                    await self.workers["stream"].call("video.stop_localisation")
+                    await self.workers["stream"].call("videostream.stop_localisation")
                     return await self.workers["localisation"].call(op)
                 if self.mode != "MANUAL":
                     raise Fault("invalid_state", "Select MANUAL mode")
@@ -603,7 +624,10 @@ class Supervisor:
                 return await self.workers["detection"].call(op, body)
         if op in ("camera.start", "camera.stop"):
             self.require_control(session, body)
-            with_imu = boolean(body, "with_imu", True)
+            if 'with_imu' in body:
+                raise Fault('invalid_argument', 'Runtime capture always requires IMU; use direct-gst for video without IMU')
+            if set(body) - {'frame_duration_us', 'exposure_us', 'gain', 'lease_epoch'}:
+                raise Fault('invalid_argument', 'Unknown camera start setting; geometry is fixed')
             async with self.capture_lock:
                 self.require_control(session, body)
                 if op == "camera.stop":
@@ -611,12 +635,10 @@ class Supervisor:
                 if self.mode != "MANUAL":
                     raise Fault("invalid_state", "Select MANUAL mode")
                 stream = await self.workers["stream"].call("state")
-                if any(s["backend"]=="direct-gst" for s in stream.get("active_streams",[])):
+                if any(s["source"]=="direct-gst" for s in stream.get("active_streams",[])):
                     raise Fault("busy", "Stop direct-gst before starting capture")
                 camera=await self.workers["camera"].call("camera.status")
-                if camera.get('running') and (not with_imu or camera.get('imu_sync',{}).get('state') in ('aligning','matched','synced')):
-                    if not with_imu and camera.get('imu_sync', {}).get('state') != 'disabled':
-                        raise Fault('restart_required', 'IMU capture is active; stop capture explicitly before disabling it')
+                if camera.get('running') and camera.get('imu_sync',{}).get('state') in ('aligning','matched','synced'):
                     duration = number(body, 'frame_duration_us', camera['frame_duration_us'], 8333, 100000, True)
                     controls = camera.get('requested_controls', {})
                     requested = {'frame_duration_us': duration}
@@ -636,47 +658,121 @@ class Supervisor:
                     result = await self.workers["camera"].call("camera.prepare", body, timeout=10)
                     self.capture_session = object()
                     self.alignment_pending.clear()
-                    imu = await self.workers["motherboard"].call("imu.start" if with_imu else "imu.stop", {
+                    imu = await self.workers["motherboard"].call("imu.start", {
                         "frame_duration_us": result["frame_duration_us"]})
                     return await self.workers["camera"].call("camera.start", {
-                        "clock": imu["clock"] if with_imu else None}, timeout=5)
+                        "clock": imu["clock"]}, timeout=5)
                 except Exception:
                     await self._stop_capture()
                     raise
-        if op in ("camera.capabilities", "video.capabilities"):
-            return await self.workers["stream"].call(op, body)
-        if op == "video.create":
-            if self.mode != "MANUAL":
-                raise Fault("invalid_state", "Direct video is available in MANUAL mode")
-            result = await self.workers["stream"].call(op, body | {"host": session.address[0]})
-            session.streams.add(result["stream_id"])
-            if session.closed:
-                await self.workers["stream"].call("video.destroy", {"stream_id": result["stream_id"]})
-                raise Fault("session_expired", "Session closed during stream creation")
-            return result
-        if op.startswith("video."):
-            if body.get("stream_id") not in session.streams:
-                raise Fault("not_owner", "Stream belongs to another session")
+        if op == 'camera.capabilities':
+            return await self.workers['camera'].call(op)
+        if op == 'videostream.sources':
+            return await self._video_sources(body)
+        if op.startswith("videostream."):
             async with self.capture_lock:
-                if op == "video.start":
+                if session.closed:
+                    raise Fault('session_expired', 'Session closed')
+                if op not in READ_ONLY:
                     self.require_control(session, body)
+                args = body | {'session_id': session.id}
+                if op == 'videostream.create':
+                    args = body
+                if op in ('videostream.start', 'videostream.attach'):
+                    if set(body) - {'stream_id', 'rtp_port', 'lease_epoch'}:
+                        raise Fault('invalid_argument', 'Provide stream_id and rtp_port')
+                    number(body, 'rtp_port', None, 1024, 65535, True)
+                    args |= {'host': session.address[0]}
+                if op == "videostream.start":
                     camera = await self.workers["camera"].call("camera.status")
-                    video = await self.workers["stream"].call("video.status", body)
-                    runtime = video["spec"]["backend"] in ("runtime", "localisation")
+                    video = await self.workers["stream"].call("videostream.status", body)
+                    runtime = video["spec"]["source"] in ("runtime", "localisation")
                     if camera["prepared"] and not runtime:
                         raise Fault("busy", "Stop runtime capture before direct-gst")
-                    if video["spec"]["backend"] == "localisation":
+                    if video["spec"]["source"] == "localisation":
                         state=await self.workers["localisation"].call('localisation.status')
                         if not state['running']:raise Fault('not_ready','Start localisation before diagnostic video')
                     if runtime:
                         if not camera["running"]:
                             raise Fault("not_ready", "Start runtime camera before video")
-                        body = body | {"source_frame_duration_us": camera["frame_duration_us"]}
-                result = await self.workers["stream"].call(op, body)
-            if op == "video.destroy":
-                session.streams.discard(body["stream_id"])
-            return result
+                        args |= {"source_frame_duration_us": camera["frame_duration_us"]}
+                try:
+                    if op not in READ_ONLY:
+                        self.require_control(session, body)
+                    if op == 'videostream.start' and video['spec']['source'] == 'localisation':
+                        await self.workers['localisation'].call('source.start', {
+                            'source': 'localisation', 'parameters': video['spec']['parameters']})
+                        self.require_control(session, body)
+                    result = await self.workers["stream"].call(op, args)
+                    if session.closed:
+                        await self.workers['stream'].call('videostream.detach_session', {'session_id':session.id})
+                        raise Fault('session_expired', 'Session closed during stream operation')
+                    return result
+                finally:
+                    if op not in ('videostream.list', 'videostream.status', 'videostream.capabilities'):
+                        await self._sync_video_sources()
         raise Fault("not_supported", op)
+
+    async def _sync_video_sources(self, force_off=False):
+        worker = self.workers.get('localisation')
+        if worker is None:
+            return
+        try:
+            state = {} if force_off else await self.workers['stream'].call('state')
+            wanted = any(s['source'] == 'localisation' for s in state.get('active_streams', []))
+            if not wanted:
+                await worker.call('source.stop', {'source':'localisation'})
+        except Fault as exc:
+            self.log('supervisor', 'WARNING', f'Video output cleanup: {exc}')
+
+    async def _video_fault(self, role, op):
+        async with self.capture_lock:
+            if role == 'localisation':
+                await self.workers['stream'].call('videostream.stop_localisation')
+            await self._sync_video_sources(force_off=role == 'stream' and op == 'worker.fault')
+
+    async def _video_sources(self, args):
+        from .video_sources import SOURCES
+        items = []
+        stream = self.workers.get('stream')
+        try:
+            stream_state = await stream.call('state') if stream else {}
+        except Fault:
+            stream_state = {}
+        camera_worker = self.workers.get('camera')
+        try:
+            camera = await camera_worker.call('camera.status') if camera_worker else {}
+        except Fault:
+            camera = {}
+        for ident, fallback in SOURCES.items():
+            item = dict(fallback)
+            worker = self.workers.get(item['worker'])
+            item.update(available=False, reason='worker_unavailable', output=None)
+            if worker is not None and getattr(worker, 'alive', True):
+                try:
+                    declared = await worker.call('source.list')
+                    item.update(next(value for value in declared['items'] if value['id'] == ident))
+                    if ident == 'direct-gst':
+                        active = stream_state.get('active_streams', [])
+                        busy = camera.get('prepared', False) or bool(active)
+                        item.update(available=bool(camera) and not busy,
+                                    reason='camera_busy' if busy else (None if camera else 'camera_state_unknown'),
+                                    output={'publishing':any(s['source']=='direct-gst' and s['state']=='running' for s in active)})
+                    elif ident == 'runtime':
+                        item.update(available=bool(camera.get('running')), reason=None if camera.get('running') else 'camera_stopped',
+                                    output={'publishing':bool(camera.get('running') and camera.get('frames')), 'frames':camera.get('frames',0)})
+                    else:
+                        state = await worker.call('localisation.status')
+                        output = await worker.call('source.status', {'source':ident})
+                        available = bool(camera.get('running') and state.get('running') and not state.get('error') and not output.get('error'))
+                        item.update(available=available, reason=None if available else ('source_fault' if output.get('error') else 'localisation_not_ready'), output=output)
+                except (Fault, KeyError, StopIteration):
+                    item.update(available=False, reason='worker_unavailable')
+            item['stream_settings'] = {'codecs':['h264','jpeg'], 'max_fps':[1,120],
+                'max_size':[1600,1300] if ident == 'direct-gst' else [800,650],
+                'jpeg_alignment':8, 'live_update':[] if ident == 'direct-gst' else ['max_fps']}
+            items.append(item)
+        return page(items, args, 1)
 
     async def _stop_capture(self):
         self.capture_session = None
@@ -691,7 +787,7 @@ class Supervisor:
         except Fault as exc:
             self.log("supervisor", "WARNING", f"Detection stop: {exc}")
         try:
-            await self.workers["stream"].call("video.stop_runtime")
+            await self.workers["stream"].call("videostream.stop_runtime")
         except Fault as exc:
             self.log("supervisor", "WARNING", f"Runtime video stop: {exc}")
         try:
@@ -778,7 +874,7 @@ class Supervisor:
             return dict(self.body_telemetry.get(topic, {}))
         if topic == "system.workers":
             return {k: {"alive": w.alive, "state": w.state.get("state")} for k, w in self.workers.items()}
-        role = {"motion.state": "motherboard", "camera.state": "stream", "detection.state": "detection", "localisation.state": "localisation"}.get(topic)
+        role = {"motion.state": "motherboard", "camera.state": "camera", "videostream.state": "stream", "detection.state": "detection", "localisation.state": "localisation"}.get(topic)
         if role is None:
             raise Fault("not_found", "Unknown topic")
         worker = self.workers.get(role)
@@ -796,7 +892,7 @@ class Supervisor:
             return {"topic": topic, "valid": valid, "source_mono_ns": source,
                     "age_ms": round(age) if age is not None else None,
                     "data": data | {"valid": valid}}
-        role = {"motion.state": "motherboard", "camera.state": "stream", "detection.state": "detection", "localisation.state": "localisation"}.get(topic)
+        role = {"motion.state": "motherboard", "camera.state": "camera", "videostream.state": "stream", "detection.state": "detection", "localisation.state": "localisation"}.get(topic)
         worker = self.workers.get(role)
         observed = worker.last_heartbeat if worker else time.monotonic()
         if topic == "localisation.state":
@@ -893,11 +989,13 @@ class Supervisor:
             await self._sync_body_watch()
         except Fault as exc:
             self.log("supervisor", "WARNING", f"Body telemetry release: {exc}")
-        for ident in list(session.streams):
+        async with self.capture_lock:
             try:
-                await self.workers["stream"].call("video.destroy", {"stream_id": ident})
-            except Fault:
-                pass
+                if 'stream' in self.workers:
+                    await self.workers["stream"].call("videostream.detach_session", {"session_id": session.id})
+            except Fault as exc:
+                self.log('stream', 'WARNING', f'Detach expired session: {exc}')
+            await self._sync_video_sources()
         self.sessions.pop(session.id, None)
 
     async def _maintenance(self):

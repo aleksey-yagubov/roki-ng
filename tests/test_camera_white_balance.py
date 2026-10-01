@@ -25,7 +25,7 @@ def camera(values):
 
 def test_manual_wb_loaded_from_robot_profile_at_start():
     c = camera({RED: 1.19, BLUE: 2.61})
-    c.command('camera.start', {})
+    c.command('camera.start', {'clock': {'stm_us':0,'host_ns':0,'uncertainty_ns':0}})
     controls = c.camera.start.call_args.args[0]
     assert controls['awb'] is False
     assert controls['ae'] is False
@@ -34,7 +34,7 @@ def test_manual_wb_loaded_from_robot_profile_at_start():
 
 def test_live_wb_uses_next_recycled_request_without_restart():
     c = camera({RED: 1.0, BLUE: 1.0})
-    c.command('camera.start', {})
+    c.command('camera.start', {'clock': {'stm_us':0,'host_ns':0,'uncertainty_ns':0}})
     c.camera.controls = {'wb': NS(min=0.0, max=32.0)}
     stream = object()
     c.stream = stream
@@ -57,7 +57,7 @@ def test_bad_wb_does_not_replace_valid_pair(bad):
     c = camera({RED: 1.19, BLUE: 2.61})
     with pytest.raises(Fault):
         c.command('params.apply', {RED: bad})
-    c.command('camera.start', {})
+    c.command('camera.start', {'clock': {'stm_us':0,'host_ns':0,'uncertainty_ns':0}})
     assert c.camera.start.call_args.args[0]['wb'] == (1.19, 2.61)
 
 
@@ -101,7 +101,7 @@ def test_exposure_and_auto_controls_use_recycled_request():
     c=camera({})
     c.camera.controls={name:NS(min=low,max=high) for name,low,high in
                        [('wb',.01,32),('exposure',1,20000),('gain',1,16),('ae',False,True),('awb',False,True)]}
-    c.command('camera.start',{})
+    c.command('camera.start', {'clock': {'stm_us':0,'host_ns':0,'uncertainty_ns':0}})
     stream=object();c.stream=stream
     req=Mock(status='complete',buffers={stream:NS(metadata=NS(status='success'))})
     c.manager=NS(get_ready_requests=lambda:[req]);c._publish=Mock()

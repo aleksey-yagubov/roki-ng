@@ -99,28 +99,26 @@ async def check(args):
         if not await asyncio.to_thread(pipe.poll, 10) or pipe.recv() != "ready":
             raise RuntimeError("Observer failed to start")
         lease = await supervisor.dispatch(session, "control.acquire", {})
-        with_imu = not args.camera_only
-        body = {"lease_epoch": lease["lease_epoch"], "with_imu": with_imu}
+        body = {"lease_epoch": lease["lease_epoch"]}
         if args.fps30:
             body["frame_duration_us"] = 33333
         await supervisor.dispatch(session, "mode.set", body | {"mode": "MANUAL"})
         for cycle in range(args.cycles):
             await supervisor.dispatch(session, "camera.start", body)
-            if with_imu:
-                deadline = time.monotonic()+6
-                while time.monotonic() < deadline:
-                    state = await supervisor.workers["camera"].call("camera.status")
-                    if state["imu_sync"]["state"] == "synced":
-                        break
-                    if state["error"]:
-                        raise RuntimeError(state["error"])
-                    await asyncio.sleep(0.05)
-                else:
-                    raise RuntimeError("Camera failed to synchronize IMU")
-                print("SYNC", state["imu_sync"], flush=True)
-                pipe.send({"alignment":state["imu_sync"]["unicam_minus_stm"]})
-                if not await asyncio.to_thread(pipe.poll, 3) or pipe.recv() != "aligned":
-                    raise RuntimeError("Observer did not apply alignment")
+            deadline = time.monotonic()+6
+            while time.monotonic() < deadline:
+                state = await supervisor.workers["camera"].call("camera.status")
+                if state["imu_sync"]["state"] == "synced":
+                    break
+                if state["error"]:
+                    raise RuntimeError(state["error"])
+                await asyncio.sleep(0.05)
+            else:
+                raise RuntimeError("Camera failed to synchronize IMU")
+            print("SYNC", state["imu_sync"], flush=True)
+            pipe.send({"alignment":state["imu_sync"]["unicam_minus_stm"]})
+            if not await asyncio.to_thread(pipe.poll, 3) or pipe.recv() != "aligned":
+                raise RuntimeError("Observer did not apply alignment")
             await asyncio.sleep(args.seconds)
             print("CAMERA", await supervisor.workers["camera"].call("camera.status"), flush=True)
             print("MOTHERBOARD", await supervisor.workers["motherboard"].call("state"), flush=True)
@@ -130,11 +128,9 @@ async def check(args):
                 raise RuntimeError("Observer did not report")
             result = pipe.recv()
             print("RESULT", cycle, json.dumps(result), flush=True)
-            if not result["frames"] or with_imu and (not result["imu"] or not result["matches"]):
+            if not result["frames"] or not result["imu"] or not result["matches"]:
                 raise RuntimeError("Missing frames/IMU/exact sequence matches")
-            if not with_imu and result["imu"]:
-                raise RuntimeError("IMU records received while capture disabled")
-            if with_imu and result["matches"] < 0.9 * min(result["frames"], result["imu"]):
+            if result["matches"] < 0.9 * min(result["frames"], result["imu"]):
                 raise RuntimeError("Too few exact camera/IMU matches")
     finally:
         await supervisor.close()
@@ -149,7 +145,6 @@ async def check(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--30fps", dest="fps30", action="store_true")
-    parser.add_argument("--camera-only", action="store_true")
     parser.add_argument("--probe-body", action="store_true")
     parser.add_argument("--seconds", type=float, default=8)
     parser.add_argument("--cycles", type=int, default=2)

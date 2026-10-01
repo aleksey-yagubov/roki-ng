@@ -123,7 +123,7 @@ datastream не подтверждаются и не повторяются. П�
 
 Только один оператор владеет control. Второй получает `busy`. Во все изменяющие
 состояние requests добавляется `body.lease_epoch`. Исключения: собственные
-подписки/log filters/session.close и `video.stop/destroy` для собственного видео.
+подписки/log filters/session.close и `videostream.attach/detach` текущей сессии.
 После отзыва старые команды отвергаются. Внутренний urgent barrier также удаляет
 ещё не исполненные команды из normal socket worker-а.
 
@@ -509,181 +509,58 @@ Simulation проверяет последовательности и прото
 
 ## Камера и видео
 
-### Runtime-захват и IMU
+Полный актуальный контракт с запросами, ответами, ошибками и правами:
+[CAMERA_VIDEOSTREAM_PROTOCOL.md](CAMERA_VIDEOSTREAM_PROTOCOL.md).
+Передача GUI-разработчику:
+[GUI_CAMERA_VIDEOSTREAM_HANDOFF.md](GUI_CAMERA_VIDEOSTREAM_HANDOFF.md).
 
-Ручной WB runtime задаётся существующим `params.set`: ключи
-`camera.white_balance.red_gain` и `camera.white_balance.blue_gain`, float
-0.01..32, `apply=next_request`. Значения сохраняются на роботе и применяются
-при старте либо через следующий свободный libcamera Request без перезапуска
-активного захвата. Подтверждение команды не означает немедленного изменения
-кадров в ISP. AE/AWB выключены по умолчанию. Defaults 1/1 не являются калибровкой.
-Direct-gst эти параметры не использует. Проверка: [WHITE_BALANCE_FIX.md](WHITE_BALANCE_FIX.md).
+`camera.*` управляет только runtime-камерой: фиксированный сенсор
+1600x1300 RAW10, выход 800x650 BGR, обязательная синхронная IMU.
+Camera.start требует MANUAL и lease, но не запускает RTP.
+Direct-gst запускается отдельно в stream-worker, без IMU; два владельца
+одной камеры запрещены без автоматического вытеснения.
 
-Дополнительно через `params.*`: `camera.exposure_us` (default 8000),
-`camera.analogue_gain` (1.0), `camera.ae_enabled` и `camera.awb_enabled` (false).
-Все — next_request, с проверкой периода кадра и аппаратного диапазона.
+`camera.controls.list/set/save/freeze` описывают и меняют AE/AWB, exposure,
+gain и red/blue gains. Set/freeze не сохраняют JSON, save сохраняет явно.
+Requested controls и измеренные метаданные различаются. Camera.status и
+datastream camera.state описывают именно camera-worker.
 
-`camera.controls.freeze {group:"exposure"|"white_balance"|"all",lease_epoch}`
-фиксирует метаданные последнего завершённого кадра runtime. Требуются running и
-measured_age_ms<=1000; отсутствующие значения не заменяются defaults. Для exposure
-сохраняются exposure_us/gain и ae_enabled=false, для white_balance — red/blue gain
-и awb_enabled=false. Ответ: `{values:{...},source_sequence:N}`. Применение и
-сохранение используют общий batch параметров; при ошибке записи восстанавливаются
-реальные предыдущие camera-controls, включая временные camera.start overrides.
-Операция требует lease и не перезапускает pipeline. Пока нет свежих метаданных,
-отвечает not_ready; недопустимые численные метаданные отклоняются валидацией.
-При включённой автоматике ручные значения сохраняются, но не являются измерением
-её результата. `camera.status` содержит requested_controls и measured_controls
-(sequence, sensor_timestamp_ns, exposure_us, gain, colour_gains); при остановке
-измерение null. Отсутствующая метадата также null. Явные exposure_us/gain в
-camera.start имеют приоритет над сохранёнными настройками на этот захват.
+Все операции видео теперь в `videostream.*`, без алиасов `video.*`.
+Sources возвращает каталог возможных источников, включая недоступные.
+List возвращает созданные определения, включая остановленные.
+Create принимает source (direct-gst/runtime/localisation), настройки выхода
+и кодека, но не адрес получателя. Start принимает stream_id и rtp_port;
+IP берётся из управляющей сессии.
 
-`camera.start` открывает отдельный camera-worker для будущей детекции и
-локализации. Это не команда отправки RTP оператору. Нужны MANUAL и lease:
+Только владелец управления создаёт, запускает, изменяет, останавливает и
+удаляет передачи. Наблюдатель может attach/detach к работающему стриму.
+Потеря сессии удаляет только её получателя. Последний получатель отключился:
+encoder/RTP и дополнительный видеовыход производителя останавливаются;
+сама runtime-камера и алгоритмы продолжают работать.
+Потеря lease не выключает просмотр. Новый владелец управляет всеми стримами.
 
-```json
-{"lease_epoch":1,"with_imu":true,"frame_duration_us":16667,"exposure_us":8000,"gain":1.0}
-```
+Один encoder обслуживает несколько адресов через multiudpsink. Несколько
+разных runtime-передач разрешены, в том числе с одинаковым источником;
+direct-gst требует эксклюзивного захвата.
+Max_fps runtime/localisation меняется через videostream.update без перезапуска
+и ограничивает копирование/кодирование, не частоту камеры или детектора.
+Bitrate H.264 пока меняется только на остановленном стриме.
 
-Поля кроме lease необязательны; пример содержит defaults. Sensor фиксирован
-на 1600x1300 RAW10, ISP 800x650 BGR. frame_duration_us: целое 8333..100000,
-exposure_us: целое 1..frame_duration_us, gain: 1..16. Это границы проверки
-аргументов, не обещание поддержки сенсором всех частот. На голове проверены
-16667 и 33333 мкс. With_imu=false явно выключает захват стробов STM.
-
-Повторный camera.start совместимого работающего захвата возвращает его состояние
-без перезапуска. Явно переданные frame_duration_us/exposure_us/gain должны совпадать
-с текущими запрошенными настройками, иначе restart_required. Некорректные значения
-дают invalid_argument и при работающей камере. Для отключения уже включённой
-синхронной IMU также нужен явный stop/start: повтор с with_imu=false не игнорируется.
-
-Ответ camera.start подтверждает запуск, **не завершение привязки**.
-`camera.status {}` доступен без lease и возвращает running, prepared, frames,
-bad_frames, sequence, error, topic и imu_sync. Состояние imu_sync:
-
-- disabled: синхронная IMU не включена или камера остановлена.
-- aligning: собираются первые пары timestamps.
-- matched: найдено смещение, ожидается подтверждение normal-режима STM.
-- synced: переключение подтверждено, смещение можно использовать.
-
-При synced событие `camera.synchronized` содержит unicam_minus_stm, pairs,
-max_residual_ns, clock_uncertainty_ns. Оно также доступно через camera.status,
-поэтому потеря UDP-события не лишает клиента состояния. Пиксели в iceoryx2
-доступны во время aligning, но точный IMU join ещё запрещён.
-
-`camera.stop {"lease_epoch":1}` выключает pipeline и strobe capture/IMU stream.
-Остановка допустима не только в MANUAL. Ошибка даёт camera.fault или imu.fault,
-останавливает связанный захват и не подставляет выдуманное смещение. Переход
-через stop/start заново выполняет привязку. Полный контракт:
-[CAMERA_IMU_CAPTURE.md](CAMERA_IMU_CAPTURE.md).
-
-Runtime camera и direct-gst взаимоисключающие; сначала остановить действующий
-захват. Datastream camera.state пока описывает stream-worker, а для состояния
-runtime camera используется camera.status.
-
-### Прямое видео GStreamer
-
-`camera.capabilities {}` и `video.capabilities {}` не открывают камеру. Ответ
-описывает backend и настроенные defaults, не выдаёт их за измеренный каталог
-сенсора: `sensor_modes_probed=false`, `settings_verified=false`. В первой версии
-реальное probe всех режимов не реализовано. `max_active=2`, `exact_osd=false`,
-`rtcp=false`, `live_update=[]`.
-
-Поле capabilities `backends`: `["direct-gst", "runtime"]`. Runtime не
-открывает сенсор: сначала выполняется camera.start. В video.create указать
-`backend:"runtime"`, codec/output/destination как ниже, **не передавать sensor**.
-Выход runtime не больше 800x650; его FPS не может превышать FPS запущенной камеры.
-Меньшая частота получается пропуском кадров, а не изменением режима сенсора.
-Для RTP/JPEG использовать размер, кратный 8, например 800x648; H.264 поддерживает
-800x650. Растяжение выполняет преобразователь GStreamer, а не camera-worker.
-
-Video.stop для runtime не останавливает camera/IMU. Camera.stop останавливает
-runtime-видео и детектор перед закрытием камеры; событие video.stopped содержит
-reason=camera_stopped. После нового camera.start можно снова video.start с тем
-же stream_id. Bitrate H.264 меняется через video.update при остановленном видео.
-При всех backend exact_osd=false; OSD не добавляется в RTP.
-
-Создание определения:
-
-```json
-{
-  "lease_epoch":1,
-  "backend":"direct-gst",
-  "sensor":{"width":1600,"height":1300,"depth":10},
-  "output":{"width":800,"height":650,"fps":60},
-  "codec":{"name":"h264","bitrate":2000000},
-  "destination":{"rtp_port":5004},
-  "mtu":1400
-}
-```
-
-Все вложенные карты и поля можно опустить: приведены defaults. Sensor depth:
-8 или 10; width 320..4096, height 240..4096. Это допустимые запросы, фактическую
-поддержку проверяет libcamera при start. Сенсор задаётся явно через sensor-config,
-по умолчанию полный `1600x1300 RAW10`; скрытого автовыбора 1280x720 нет.
-
-Output: чётные width 160..1600 и height 120..1300, не больше сенсора; fps 1..120.
-Частота запрашивается raw caps GStreamer; физически достижимая частота зависит
-от режима сенсора и кодера. Sensor FPS отдельно не задаётся. Bitrate H.264:
-100000..20000000 bit/s. JPEG не принимает bitrate; размеры RTP/JPEG кратны 8
-(например 800x648). Profile H.264 в данном CM4 pipeline фиксирован high/level4.2.
-
-Destination IP берётся из сессии независимо от полей клиента. rtp_port:
-1024..65535. MTU: 576..1400, default 1400 (включая RTP header, без UDP/IP).
-До восьми определений видео суммарно. Одновременно разрешены один runtime и
-один localisation pipeline с разными RTP-портами. Direct-gst эксклюзивен.
-
-| Операция | Аргументы помимо lease | Поведение |
-| --- | --- | --- |
-| `video.create` | Карты из примера | Создаёт stream_id без capture |
-| `video.start` | stream_id | Запускает, ответ state=starting; ожидается событие |
-| `video.status` | stream_id | Полное определение, state, packets |
-| `video.update` | stream_id, bitrate | Только остановленный H.264; активный даёт restart_required |
-| `video.stop` | stream_id | NULL pipeline, освобождение камеры; определение сохраняется |
-| `video.destroy` | stream_id | Освобождение pipeline и удаление определения |
-
-Определение: `stream_id` (32 hex string), `state`, `spec` (нормализованный create),
-`host`, `ssrc` uint32, `payload_type` (H264=96, JPEG=26), `clock_rate=90000`,
-`encoding_name`, `exact_osd=false`, `error` string/null.
-
-После первых RTP buffers worker отправляет `video.started` с определением и
-`negotiated_caps` для входа кодера. Это показывает фактически согласованный
-размер/формат processed stream, не подтверждает RAW metadata. `video.failed`
-содержит stream_id и error. GStreamer ERROR/EOS или 10 секунд без RTP buffers
-закрывают pipeline, а worker остаётся жив. Повтор start разрешён после устранения
-причины. Native output libcamera/GStreamer доступен через logs.
-
-Перед `video.start` клиент открывает UDP receiver и подготавливает pipeline.
-Пример H.264 на Linux:
-
-```sh
-gst-launch-1.0 udpsrc port=5004 caps='application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000' \
-  ! rtpjitterbuffer latency=30 drop-on-latency=true \
-  ! rtph264depay ! h264parse ! vah264dec ! waylandsink sync=false
-```
-
-В Qt sink заменяется на qml6glsink с привязкой к QQuickItem. JPEG receiver:
-`rtpjpegdepay ! jpegparse ! vajpegdec` с caps `encoding-name=JPEG,payload=26`.
-На других платформах decoder выбирается клиентом из доступных.
-
-RTP sequence нумерует пакеты, timestamp использует clock 90000, marker означает
-границу кадра по соответствующему payload format. В direct-gst сейчас нет
-UnicamSequence header extension и точного OSD. Реализация основана на рабочем
-`roki-buildroot/.../root/stream-full-fov.sh`; свойства RTP описаны в
-[GStreamer rtph264pay](https://gstreamer.freedesktop.org/documentation/rtp/rtph264pay.html),
-собственный UDP socket передаётся в
-[GstMultiUDPSink](https://gstreamer.freedesktop.org/documentation/udp/multiudpsink.html).
+Каждый start создаёт новый run_id/SSRC. Exact_osd=false:
+UnicamSequence RTP extension и MessagePack OSD этим этапом не реализованы.
+Просмотры/окна существуют только на стороне GUI.
 
 ## Запрашиваемые datastream
 
-Доступны `system.workers`, `motion.state`, `camera.state`, `detection.state`,
-`body.imu`, `body.stabilization`, `body.servos`. Первые четыре являются snapshots состояния
+Доступны `system.workers`, `motion.state`, `camera.state`, `videostream.state`,
+`detection.state`, `localisation.state`, `body.imu`, `body.stabilization`, `body.servos`.
+Состояния workers являются snapshots состояния
 процессов, не измеренной телеметрией серв/IMU. Body state:
 state (ready/fault), pose, active_job, head (заданные ticks), error, simulated.
-Stream state: state, active_streams [{stream_id, backend, state}], packets,
+Stream state: state, active_streams [{stream_id, source, state}], packets,
 frames_submitted, frames_skipped, simulated.
-Также backend, frames_submitted, frames_skipped для runtime-video. Skipped
-учитывает видимые читателю пропуски/ограничение FPS, не все возможные потери сети.
+Skipped учитывает видимые читателю пропуски/ограничение FPS,
+не все возможные потери сети.
 Detection state содержит running/profile/frames/error/result/age_ms;
 result описывает цветовые области конкретного кадра, не координаты на поле.
 
@@ -941,10 +818,13 @@ code, не разбирает сообщение. retryable означает в�
 3. По Connect Control: control.acquire, затем mode.set MANUAL.
 4. Кнопки движений вызывают requests, WASD посылает drive samples; при потере
    фокуса/отпускании всех клавиш посылается zero drive. Не создавать очередь кликов.
-5. После video.create настроить receiver, затем video.start; video.started
-   подтверждает поток, video.failed показывает причину и сохраняет Stop видимым.
-6. Подписки motion.state/camera.state и job.status восстанавливают потерянные события.
-7. Disconnect останавливает своё видео, отпускает control и закрывает session.
+5. Запросить videostream.sources/list. Для новой передачи: create, подготовить
+   receiver, start с rtp_port. Наблюдатель вызывает attach к работающей передаче.
+   События videostream.started/failed дополняются запросами status.
+6. Подписки motion.state/camera.state/videostream.state и job.status
+   восстанавливают потерянные события.
+7. Disconnect отсоединяет свои видеополучатели, отпускает control и закрывает
+   session. Не вызывать общий stop, если передачу ещё смотрят другие операторы.
 
 Готовая Python-реализация транспорта: `roki_ng/client.py`. Её asyncio loop можно
 держать в отдельном потоке от Qt GUI; QWidget/QQuickItem изменяются только из
@@ -1085,17 +965,18 @@ GUI скрывает маркер при остановке, ошибке, ра�
 
 ## Обработанное видео локализатора
 
-`video.create` принимает `backend="localisation"`: рамки стоек, круг и отрезки
+`videostream.create` принимает `source="localisation"`: рамки стоек, круг и отрезки
 рисуются на роботе до кодирования, 800×650 BGR, без sensor в запросе.
-`video.start` требует уже запущенной локализации и камеры. Управление, кодеки,
+`videostream.start` требует уже запущенной локализации и камеры. Управление, кодеки,
 адрес получателя и жизненный цикл — как у runtime video. Подробнее: LOCALISATION_VIDEO.md.
 
-Размеченные кадры готовятся только при наличии подписки стрим-воркера на
-диагностический источник, создаваемой при `video.start`. `video.create`,
+Размеченные кадры готовятся только по внутреннему source.start и при наличии
+подписки стрим-воркера на диагностический источник. `videostream.create`,
 `localisation.start` и `data.subscribe` сами по себе рисование не включают.
-Остановка/удаление видео, штатная обработка ошибки pipeline или закрытие сессии
-закрывают подписку и прекращают подготовку картинки, не вычисление локализации.
-Повторный `video.start` возобновляет картинку без перезапуска локализации.
+Остановка последней передачи источника закрывает подписку и прекращает
+подготовку картинки, не вычисление локализации. Закрытие сессии удаляет только
+её получателя; передача для остальных продолжается.
+Повторный `videostream.start` возобновляет картинку без перезапуска локализации.
 
 Диагностический результат локализации: `goal_candidates` содержит только стойки,
 прошедшие проверку основания по matched-позе (до двух на цвет). `goal_rejected`

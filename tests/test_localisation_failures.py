@@ -40,11 +40,13 @@ def test_channel_checks_current_subscriber_count():
 
 
 @pytest.mark.parametrize('failure', ['frame', 'render', 'publisher', 'loan',
-                                     'no_subscriber', 'subscription_changes', 'stop_during_render'])
+                                     'not_requested', 'no_subscriber', 'subscription_changes', 'stop_during_render'])
 def test_localisation_continues_after_bad_frame_or_video_failure(tmp_path, monkeypatch, failure):
     logs, events, rendered, published, channels = [], [], [], [], {}
     worker = localisation_worker.Localisation(
         {'state_dir': str(tmp_path)}, lambda *a: events.append(a), lambda *a: logs.append(a))
+    if failure != 'not_requested':
+        worker.video_requested.set()
     clock = [1.0]
     monkeypatch.setattr(localisation_worker, 'time', NS(monotonic=lambda: clock[0]))
 
@@ -147,7 +149,7 @@ def test_localisation_continues_after_bad_frame_or_video_failure(tmp_path, monke
     if failure == 'frame':
         assert 'after erosion' in rendered[0]['reason']
         assert published == [0, 1] and not logs
-    elif failure == 'no_subscriber':
+    elif failure in ('no_subscriber', 'not_requested'):
         assert not rendered and not published and not logs
     elif failure == 'subscription_changes':
         assert [r['frame_sequence'] for r in rendered] == [1, 3]

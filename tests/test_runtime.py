@@ -79,20 +79,21 @@ def test_walk_release_settles(tmp_path):
 def test_video_lifecycle_does_not_open_on_query():
     events = []
     video = Streams({"simulate": True}, lambda *a: events.append(a), lambda *a: None)
-    video.command("camera.capabilities", {})
-    info = video.command("video.create", {"host": "127.0.0.1"})
+    video.command("videostream.capabilities", {})
+    info = video.command("videostream.create", {})
     assert not video.state()["active_streams"]
     assert all(p.Gst is None for p in video.pipelines.values())
     text = pipeline_description(info["spec"])
     assert "width=1600,height=1300,depth=10" in text
     assert "width=800,height=650,framerate=60/1" in text
     assert "libcamerasrc" in text and "v4l2h264enc" in text
-    video.command("video.start", {"stream_id": info["stream_id"]})
-    other = video.command("video.create", {"host": "127.0.0.1"})
+    destination = {'session_id':1, 'host':'127.0.0.1', 'rtp_port':5004}
+    video.command("videostream.start", {"stream_id": info["stream_id"], **destination})
+    other = video.command("videostream.create", {})
     with pytest.raises(Fault, match="owns"):
-        video.command("video.start", {"stream_id": other["stream_id"]})
-    video.command("video.stop", {"stream_id": info["stream_id"]})
-    video.command("video.start", {"stream_id": other["stream_id"]})
+        video.command("videostream.start", {"stream_id": other["stream_id"], **destination})
+    video.command("videostream.stop", {"stream_id": info["stream_id"]})
+    video.command("videostream.start", {"stream_id": other["stream_id"], **destination})
     video.close()
     assert not video.state()["active_streams"]
     with pytest.raises(Fault):
@@ -130,20 +131,20 @@ def test_udp_processes(tmp_path):
             await asyncio.sleep(0.7)
             state = await client.request("data.snapshot", {"topic": "motion.state"})
             assert state["data"]["pose"] == "crouch"
-            stream = await client.request("video.create")
+            stream = await client.request("videostream.create")
             assert stream["state"] == "created"
-            await client.request("video.start", {"stream_id": stream["stream_id"]})
+            await client.request("videostream.start", {"stream_id": stream["stream_id"], 'rtp_port':5004})
             await asyncio.sleep(0.15)
-            assert (await client.request("video.status", {"stream_id": stream["stream_id"]}))["state"] == "running"
+            assert (await client.request("videostream.status", {"stream_id": stream["stream_id"]}))["state"] == "running"
             # Retransmit the same create datagram: only one resource is allocated.
-            await client._exchange("request", "video.create", {"lease_epoch": client.lease_epoch})
+            await client._exchange("request", "videostream.create", {"lease_epoch": client.lease_epoch})
             duplicate_id = client.id
-            raw = pack(envelope("request", "video.create", {"lease_epoch": client.lease_epoch},
+            raw = pack(envelope("request", "videostream.create", {"lease_epoch": client.lease_epoch},
                                 session=client.session, token=client.token, id=duplicate_id))
-            count = len(server.sessions[client.session].streams)
+            count = (await client.request('videostream.list'))['total']
             await asyncio.get_running_loop().sock_sendto(client.sock, raw, client.address)
             await asyncio.sleep(0.1)
-            assert len(server.sessions[client.session].streams) == count
+            assert (await client.request('videostream.list'))['total'] == count
             # A malformed datagram cannot stop the service.
             await asyncio.get_running_loop().sock_sendto(client.sock, b"\xc1", client.address)
             assert (await client.request("system.status"))["state"] == "MANUAL"
@@ -179,7 +180,7 @@ def test_worker_fault_keeps_control_endpoint_alive(tmp_path):
             assert server.workers["stream"].process.pid != old_pid
             assert (await client.request("system.status"))["state"] == "IDLE"
             await client.request("mode.set", {"mode": "MANUAL"})
-            assert (await client.request("video.create"))["state"] == "created"
+            assert (await client.request("videostream.create"))["state"] == "created"
             await worker.close()
         finally:
             await client.close()
@@ -207,8 +208,8 @@ def test_dead_client_cleanup(tmp_path):
             await client.connect()
             await client.request("control.acquire")
             await client.request("mode.set", {"mode": "MANUAL"})
-            info = await client.request("video.create")
-            await client.request("video.start", {"stream_id": info["stream_id"]})
+            info = await client.request("videostream.create")
+            await client.request("videostream.start", {"stream_id": info["stream_id"], 'rtp_port':5004})
             for task in client.tasks:
                 task.cancel()
             await asyncio.gather(*client.tasks, return_exceptions=True)

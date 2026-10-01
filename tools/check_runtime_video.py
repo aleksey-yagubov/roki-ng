@@ -33,18 +33,17 @@ async def check(args):
         await client.connect()
         await client.request("control.acquire")
         await client.request("mode.set", {"mode": "MANUAL"})
-        await client.request("camera.start", {"with_imu": True})
+        await client.request("camera.start")
         owns_capture = True
         if args.detection:
             await client.request("detection.start", {"profile": "orange_ball"})
-        info = await client.request("video.create", {
-            "backend": "runtime", "codec": {"name": args.codec},
-            "output": {"width": 800, "height": 648 if jpeg else 650, "fps": 30},
-            "destination": {"rtp_port": port}})
+        info = await client.request("videostream.create", {
+            "source": "runtime", "codec": {"name": args.codec},
+            "output": {"width": 800, "height": 648 if jpeg else 650, "fps": 30}})
         ident = info["stream_id"]
         sink = pipeline.get_by_name("frames")
         for cycle in range(2):
-            await client.request("video.start", {"stream_id": ident})
+            await client.request("videostream.start", {"stream_id": ident, "rtp_port":port})
             count = 0
             first_received = None
             deadline = time.monotonic() + 15 + args.frames / 15
@@ -59,7 +58,7 @@ async def check(args):
                     count += 1
                 else:
                     await asyncio.sleep(0.01)
-            state = await client.request("video.status", {"stream_id": ident})
+            state = await client.request("videostream.status", {"stream_id": ident})
             assert count == args.frames and state["state"] == "running", (count, state)
             elapsed = time.monotonic() - first_received
             assert elapsed < args.frames / 10, f"Only {(count - 1) / elapsed:.1f} decoded FPS"
@@ -73,7 +72,7 @@ async def check(args):
                 assert detector["result"]["frame_sequence"] <= camera["sequence"] + 10
                 print("DETECTION", detector, flush=True)
             if cycle == 0:
-                await client.request("video.stop", {"stream_id": ident})
+                await client.request("videostream.stop", {"stream_id": ident})
                 await asyncio.sleep(0.3)
                 after = await client.request("camera.status")
                 assert after["sequence"] > camera["sequence"] and after["imu_sync"]["state"] == "synced"
@@ -81,14 +80,14 @@ async def check(args):
                     pass
         await client.request("camera.stop")
         owns_capture = False
-        assert (await client.request("video.status", {"stream_id": ident}))["state"] == "stopped"
+        assert (await client.request("videostream.status", {"stream_id": ident}))["state"] == "stopped"
         if args.detection:
             assert not (await client.request("detection.status"))["running"]
         print("STOPPED: runtime video followed camera stop", flush=True)
     finally:
         try:
             if ident:
-                await client.request("video.destroy", {"stream_id": ident})
+                await client.request("videostream.destroy", {"stream_id": ident})
         finally:
             try:
                 if owns_capture:
