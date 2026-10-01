@@ -423,6 +423,8 @@ class Supervisor:
                     self.send(session, "event", "motion.rejected", {"error": exc.as_dict()})
 
     async def dispatch(self, session, op, body, *, _from_game=False):
+        if _from_game and (op != 'camera.start' or not self.game.info['running'] or self.game.stop_requested):
+            raise Fault('cancelled', 'No active game capture request')
         if op == "game.status":
             return self.game.state()
         if op in ("game.start", "game.stop"):
@@ -480,9 +482,11 @@ class Supervisor:
                 if self.owner is None:
                     self.require_motion_ready()
                     self.lease_epoch += 1
-                    await self.workers["motherboard"].call("control.acquire", urgent=True)
+                    if not self.game.info['running']:
+                        await self.workers["motherboard"].call("control.acquire", urgent=True)
                     if session.closed:
-                        await self.workers["motherboard"].call("control.release", urgent=True)
+                        if not self.game.info['running']:
+                            await self.workers["motherboard"].call("control.release", urgent=True)
                         raise Fault("session_expired", "Session closed during acquisition")
                     self.owner = session.id
                 return {"lease_epoch": self.lease_epoch, "motion_ready": self.motion_ready}
@@ -512,7 +516,7 @@ class Supervisor:
             key = body.get("key")
             meta = self.params.describe(key)
             return meta if op.endswith("describe") else {"key": key, "value": self.params.values[key]}
-        if op not in READ_ONLY:
+        if op not in READ_ONLY and not _from_game:
             self.require_control(session, body)
         if op == 'camera.controls.list':
             return await self.workers['camera'].call(op, body)
@@ -655,7 +659,8 @@ class Supervisor:
                         raise Fault("not_ready", "Start runtime camera before detection")
                 return await self.workers["detection"].call(op, body)
         if op in ("camera.start", "camera.stop"):
-            self.require_control(session, body)
+            if not _from_game:
+                self.require_control(session, body)
             if 'with_imu' in body:
                 raise Fault('invalid_argument', 'Runtime capture always requires IMU; use direct-gst for video without IMU')
             if set(body) - {'frame_duration_us', 'exposure_us', 'gain', 'lease_epoch'}:
@@ -663,7 +668,9 @@ class Supervisor:
             async with self.capture_lock:
                 if not _from_game:
                     self.require_game_idle()
-                self.require_control(session, body)
+                    self.require_control(session, body)
+                elif self.game.stop_requested or not self.game.info['running']:
+                    raise Fault('cancelled', 'Game capture request cancelled')
                 if op == "camera.stop":
                     return await self._stop_capture()
                 if self.mode != "MANUAL" and not (_from_game and self.mode == 'GAME'):
@@ -1011,7 +1018,12 @@ class Supervisor:
         async with self.control_lock:
             if self.owner != session.id:
                 return
-            await self.game.stop('control_released')
+            if self.game.info['running'] and self.mode == 'GAME':
+                # The operator lease is not the autonomous body's lifetime.
+                self.owner = None
+                session.latest_drive = None
+                return
+            await self.game.stop('control_released', hard=self.mode == 'FAULT')
             self.owner = None
             session.latest_drive = None
             try:

@@ -368,3 +368,36 @@ def test_game_step_finishes_current_cycle_then_terminal_cycle(tmp_path):
     list(plan)
     assert calls == [(10.,1000000),(0,1)]
     assert body.pose == 'crouch'
+
+
+@pytest.mark.parametrize('disconnect', [False, True])
+def test_game_survives_operator_release_and_reacquisition(tmp_path, disconnect):
+    from roki_ng.supervisor import Supervisor, Session
+    async def run():
+        s = Supervisor({'simulate':True,'state_dir':str(tmp_path)})
+        s.workers = {r:Worker(r) for r in ('motherboard','camera','detection','stream')}
+        s.mode, s.owner, s.lease_epoch = 'MANUAL', 1, 3
+        owner, viewer = Session(1,2,(),'owner'), Session(2,3,(),'viewer')
+        original = s.workers['camera'].call
+        async def camera(op, args=None, **kwargs):
+            if op == 'camera.status':
+                return {'running':True,'prepared':True,'frame_duration_us':16667,
+                        'imu_sync':{'state':'synced','unicam_minus_stm':5}}
+            return await original(op,args,**kwargs)
+        s.workers['camera'].call = camera
+        s.sessions[1] = owner
+        await s.dispatch(owner,'game.start',{'strategy':'FIRA_penalty_Goalkeeper','lease_epoch':3})
+        # Disconnect before the background task even starts its camera request.
+        if disconnect:
+            await s._expire(owner)
+        else:
+            await s.dispatch(owner,'control.release',{'lease_epoch':3})
+        await until(lambda:s.game.state()['decision']=='left')
+        assert s.owner is None and s.mode=='GAME'
+        assert not any(op=='control.release' for op,_ in s.workers['motherboard'].calls)
+        lease = await s.dispatch(viewer,'control.acquire',{})
+        assert s.game.state()['running'] and s.mode=='GAME'
+        assert not any(op=='control.acquire' for op,_ in s.workers['motherboard'].calls)
+        await s.dispatch(viewer,'game.stop',lease)
+        assert not s.game.state()['running'] and s.mode=='MANUAL'
+    asyncio.run(run())

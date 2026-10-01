@@ -144,8 +144,7 @@ class Goalkeeper:
                     return
                 await self._call('motherboard', 'motion.head', {'pan': 0, 'tilt': p['game.head_tilt']})
                 await asyncio.sleep(.5)
-            await self.s.dispatch(self.session, 'camera.start',
-                                  {'lease_epoch': self.s.lease_epoch}, _from_game=True)
+            await self.s.dispatch(None, 'camera.start', {}, _from_game=True)
             until = time.monotonic() + 15
             while True:
                 camera = await self._call('camera', 'camera.status')
@@ -165,8 +164,8 @@ class Goalkeeper:
             last_seen = time.monotonic()
             self.info['path_m'] = 0.
             while not self.stop_requested:
-                if self.s.owner != self.session.id or self.s.mode != 'GAME':
-                    raise Fault('not_owner', 'Game control revoked')
+                if self.s.mode != 'GAME':
+                    raise Fault('invalid_state', 'Game mode revoked')
                 body = await self._call('motherboard', 'state')
                 if not body.get('body_connected') or body.get('error'):
                     raise Fault('body_unavailable', 'Body connection lost')
