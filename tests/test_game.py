@@ -11,7 +11,9 @@ from roki_ng.wire import Fault
 
 def observation(y=.2, seq=1):
     return dict(running=True, error=None, age_ms=10,
-                result=dict(valid=True, frame_sequence=seq, sensor_timestamp_ns=time.monotonic_ns(), x_m=1., y_m=y))
+                result=dict(valid=True, frame_sequence=seq,
+                            sensor_timestamp_ns=time.clock_gettime_ns(getattr(time, 'CLOCK_BOOTTIME', time.CLOCK_MONOTONIC)),
+                            x_m=1., y_m=y))
 
 
 @pytest.mark.parametrize('y,expected', [(.2, 'left'), (-.2, 'right'), (.05, 'hold')])
@@ -119,7 +121,7 @@ def test_failed_ball_stops_and_does_not_resume(tmp_path):
     asyncio.run(run())
 
 
-def test_physical_path_budget_and_urgent_stop(tmp_path):
+def test_physical_path_budget_keeps_completed_crouch(tmp_path):
     async def run():
         game, s, session = setup(tmp_path)
         s.params.values.update({'game.geometry_verified': True, 'game.max_path_m': .1})
@@ -127,7 +129,7 @@ def test_physical_path_budget_and_urgent_stop(tmp_path):
         await until(lambda: not game.state()['running'])
         calls = s.workers['motherboard'].calls
         assert sum(op == 'game.step' for op, _ in calls) == 1
-        assert calls[-1][0] == 'motion.stop_hard'
+        assert not any(op == 'motion.stop_hard' for op, _ in calls)
         assert 'budget' in game.state()['reason']
     asyncio.run(run())
 
@@ -177,7 +179,9 @@ def test_stop_does_not_interrupt_fault_cleanup(tmp_path):
     async def run():
         game, s, session = setup(tmp_path)
         s.params.values['game.geometry_verified'] = True
-        s.workers['detection'].bad_ball = True
+        async def failed_step(*args):
+            raise Fault('imu_invalid', 'test fault during active step')
+        game._monitor_step = failed_step
         original = s.workers['motherboard'].call
         entered, release = asyncio.Event(), asyncio.Event()
         async def wait_stop(op, *args, **kwargs):
@@ -301,3 +305,66 @@ def test_full_parameter_snapshot_fits_worker_ipc(tmp_path):
     # The larger internal map limit must not relax untrusted operator messages.
     public = pack({'x': {str(i): 0 for i in range(129)}})
     with pytest.raises(Fault, match='MessagePack'): unpack(public)
+
+
+def test_lost_ball_finishes_step_without_hard_stop(tmp_path):
+    async def run():
+        game, s, _ = setup(tmp_path)
+        worker = s.workers['motherboard']
+        original = worker.call
+        polls = 0
+        async def call(op, args=None, **kwargs):
+            nonlocal polls
+            if op == 'job.status':
+                polls += 1
+                return {'status':'completed' if polls == 3 else 'running'}
+            return await original(op, args, **kwargs)
+        worker.call = call
+        s.workers['detection'].bad_ball = True
+        game.motion_inflight = True
+        await game._monitor_step({'job_id':'step'}, 0., s.params.values)
+        assert not game.motion_inflight
+        assert [op for op, _ in worker.calls].count('motion.stop_graceful') == 1
+        assert not any(op == 'motion.stop_hard' for op, _ in worker.calls)
+    asyncio.run(run())
+
+
+def test_graceful_game_stop_waits_for_support_pose(tmp_path):
+    async def run():
+        game, s, session = setup(tmp_path)
+        game.session = session
+        game.info.update(running=True, observe_only=False)
+        game.motion_inflight = True
+        entered, completed = asyncio.Event(), asyncio.Event()
+        async def step():
+            entered.set()
+            await completed.wait()
+            game.motion_inflight = False
+        game.task = asyncio.create_task(step())
+        await entered.wait()
+        stopping = asyncio.create_task(game.stop())
+        await asyncio.sleep(0)
+        assert game.stop_requested and not stopping.done() and not game.task.cancelled()
+        completed.set()
+        await stopping
+        assert not game.task.cancelled()
+    asyncio.run(run())
+
+
+def test_game_step_finishes_current_cycle_then_terminal_cycle(tmp_path):
+    from roki_ng.body import Body
+    body = Body({'simulate':True,'parameters':Parameters(tmp_path).values}, lambda *a:None, lambda *a:None)
+    body.simulated = False
+    body.read_body_quaternion = lambda: [0,0,0,1]
+    calls = []
+    def walk(x, side, rotation, cycle, total):
+        calls.append((side, total))
+        yield 'sleep', .01
+        yield 'sleep', .01
+    body._engine = lambda: SimpleNamespace(walk_Cycle=walk)
+    plan = body._game_step('left', 0., 10., 2)
+    next(plan)
+    body.stop_requested = True
+    list(plan)
+    assert calls == [(10.,1000000),(0,1)]
+    assert body.pose == 'crouch'

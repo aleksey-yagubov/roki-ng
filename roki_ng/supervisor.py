@@ -370,7 +370,7 @@ class Supervisor:
 
     async def _take_control(self, session):
         """Called under control_lock. Revoke first, then reset via urgent IPC."""
-        await self.game.stop('control_takeover')
+        await self.game.stop('control_takeover', hard=True)
         previous = self.owner
         old = self.local_session if previous == self.local_session.id else self.sessions.get(previous)
         self.owner = session.id
@@ -437,7 +437,7 @@ class Supervisor:
                 return await self.game.start(session, body)
         if op in ('motion.stop_hard', 'motion.stop_graceful') or (op == 'mode.set' and body.get('mode') == 'IDLE'):
             self.require_control(session, body)
-            await self.game.stop('operator_stop')
+            await self.game.stop('operator_stop', hard=op == 'motion.stop_hard')
         elif (self.game.info['running'] or self.game.starting) and not _from_game:
             if (op.startswith(('motion.', 'test.', 'camera.', 'detection.', 'localisation.', 'params.'))
                   and op not in READ_ONLY) or op in ('mode.set', 'system.restart_stream_worker', 'job.cancel'):
@@ -1073,7 +1073,7 @@ class Supervisor:
 
     async def close(self):
         self.closing = True
-        await self.game.stop('shutdown')
+        await self.game.stop('shutdown', hard=True)
         if self.button_task:
             self.button_task.cancel()
             await asyncio.gather(self.button_task, return_exceptions=True)

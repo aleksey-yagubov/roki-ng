@@ -371,7 +371,7 @@ class Body:
                 raise Fault("not_found", "Job is not active")
             if self.recovery_active:
                 return self.command("motion.stop_hard", {})
-            if self.active and self.jobs[self.active]["operation"] not in ("motion.drive", "test.start"):
+            if self.active and self.jobs[self.active]["operation"] not in ("motion.drive", "test.start", "game.step"):
                 raise Fault("not_supported", "This motion requires hard stop or completion")
             self.stop_requested = True
             self.drive = None
@@ -826,6 +826,8 @@ class Body:
         # Finite autonomous primitive: do not inherit manual drive scaling.
         right_first = direction == "right"
         for cycle in range(cycles):
+            if self.stop_requested:
+                break
             measured = quaternion_yaw(self.read_body_quaternion())
             error = wrap(measured - heading)
             if abs(error) > .35:

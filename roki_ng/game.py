@@ -35,6 +35,9 @@ class Goalkeeper:
         self.generation = 0
         self.cleaning = False
         self.starting = False
+        self.stop_requested = False
+        self.hard_stop_requested = False
+        self.motion_inflight = False
         self.info = dict(running=False, state='stopped', observe_only=True,
                          reason='', decision='hold', ball=None, travel_m=0., job_id=None)
 
@@ -70,6 +73,7 @@ class Goalkeeper:
             raise Fault('not_ready', 'Center head pan before observation-only goalkeeper')
         self.session = session
         self.cleaning = False
+        self.stop_requested = self.hard_stop_requested = self.motion_inflight = False
         self.info = dict(running=True, state='preparing', observe_only=observe,
                          reason='', decision='hold', ball=None, travel_m=0.,
                          job_id=uuid.uuid4().hex)
@@ -77,13 +81,18 @@ class Goalkeeper:
         self.task = asyncio.create_task(self._run(params, delay))
         return self.state()
 
-    async def stop(self, reason='operator_stop'):
+    async def stop(self, reason='operator_stop', *, hard=False):
+        # Escalation must not wait behind another caller awaiting graceful stop.
+        self.stop_requested = True
+        self.hard_stop_requested |= hard
+        if hard and self.task and not self.task.done() and not self.cleaning:
+            self.task.cancel()
         async with self.stop_lock:
             self.generation += 1
             task = self.task
             if task and not task.done():
                 self.info.update(state='stopping', reason=reason, decision='hold')
-                if not self.cleaning:
+                if not self.cleaning and (self.hard_stop_requested or not self.motion_inflight):
                     task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
             if self.info['state'] != 'failed':
@@ -100,6 +109,7 @@ class Goalkeeper:
         while time.monotonic() < until:
             job = await self._call('motherboard', 'job.status', {'job_id': response['job_id']})
             if job['status'] == 'completed':
+                self.motion_inflight = False
                 return
             if job['status'] in ('failed', 'cancelled'):
                 raise Fault('motion_fault', job.get('reason') or 'Game motion interrupted')
@@ -128,7 +138,10 @@ class Goalkeeper:
             heading = await self._imu()
             # Observation mode never changes head or body pose.
             if not observe:
+                self.motion_inflight = True
                 await self._job(await self._call('motherboard', 'motion.pose', {'name': 'crouch'}))
+                if self.stop_requested:
+                    return
                 await self._call('motherboard', 'motion.head', {'pan': 0, 'tilt': p['game.head_tilt']})
                 await asyncio.sleep(.5)
             await self.s.dispatch(self.session, 'camera.start',
@@ -151,7 +164,7 @@ class Goalkeeper:
             minimum_stamp = 0
             last_seen = time.monotonic()
             self.info['path_m'] = 0.
-            while True:
+            while not self.stop_requested:
                 if self.s.owner != self.session.id or self.s.mode != 'GAME':
                     raise Fault('not_owner', 'Game control revoked')
                 body = await self._call('motherboard', 'state')
@@ -190,6 +203,7 @@ class Goalkeeper:
                     self.info['path_m'] += reserve
                     self.info['travel_m'] += sign * reserve
                     self.info['state'] = 'stepping'
+                    self.motion_inflight = True
                     response = await self._call('motherboard', 'game.step', {
                         'direction': action, 'heading': heading,
                         'side_mm': p['game.side_step_mm'], 'cycles': p['game.step_cycles']})
@@ -206,8 +220,9 @@ class Goalkeeper:
             self.s.log('game', 'ERROR', str(exc))
         finally:
             self.cleaning = True
-            # Urgent barrier first: no queued game step can execute after stop.
-            if not observe:
+            # A failed/unknown active motion requires the urgent barrier. A normal
+            # exit after the terminal gait cycle must preserve its supported pose.
+            if not observe and (self.motion_inflight or self.hard_stop_requested):
                 self.s.motion_ready = False
                 try:
                     await self._call('motherboard', 'motion.stop_hard', urgent=True)
@@ -233,9 +248,11 @@ class Goalkeeper:
 
     async def _monitor_step(self, response, heading, p):
         until = time.monotonic() + 12
+        finishing = False
         while time.monotonic() < until:
             job = await self._call('motherboard', 'job.status', {'job_id': response['job_id']})
             if job['status'] == 'completed':
+                self.motion_inflight = False
                 return
             if job['status'] in ('failed', 'cancelled'):
                 raise Fault('motion_fault', job.get('reason') or 'Game step interrupted')
@@ -243,8 +260,12 @@ class Goalkeeper:
                 raise Fault('imu_invalid', 'Heading drift during step')
             status = await self._call('detection', 'ball.status')
             result = status.get('result') or {}
-            if (status.get('error') or not result.get('valid') or
-                    status.get('age_ms') is None or status['age_ms'] > 500):
-                raise Fault('not_ready', 'Ball observation lost during step')
+            missing = (status.get('error') or not result.get('valid') or
+                       status.get('age_ms') is None or status['age_ms'] > 500)
+            if (self.stop_requested or missing) and not finishing:
+                await self._call('motherboard', 'motion.stop_graceful', urgent=True)
+                finishing = True
+                self.info.update(state='finishing_step', decision='hold',
+                                 reason='operator_stop' if self.stop_requested else 'ball_observation_lost')
             await asyncio.sleep(.1)
         raise Fault('timeout', 'Goalkeeper step timed out')
