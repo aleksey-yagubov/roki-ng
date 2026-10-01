@@ -15,6 +15,7 @@ from .platform import Bootstrap
 from .wire import Fault, UDP_LIMIT, envelope, number, boolean, pack, page, udp_socket, unpack
 
 OPS = (
+    "game.start", "game.stop", "game.status",
     "localisation.start", "localisation.stop", "localisation.status",
     "camera.start", "camera.stop", "camera.status", "camera.controls.freeze",
     "camera.controls.list", "camera.controls.set", "camera.controls.save",
@@ -32,6 +33,7 @@ OPS = (
     "log.sources", "log.snapshot", "log.subscribe", "log.update", "log.unsubscribe",
 )
 READ_ONLY = {
+    "game.status",
     "localisation.status",
     "camera.status",
     "camera.controls.list", "videostream.sources", "videostream.list", "videostream.status",
@@ -42,7 +44,7 @@ READ_ONLY = {
     "system.operations", "session.heartbeat", "session.close",
 }
 BODY_TOPICS = ("body.imu", "body.stabilization", "body.servos")
-TOPICS = ("system.workers", "motion.state", "camera.state", "videostream.state", "detection.state", "localisation.state", *BODY_TOPICS)
+TOPICS = ("game.state", "system.workers", "motion.state", "camera.state", "videostream.state", "detection.state", "localisation.state", *BODY_TOPICS)
 LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
 REQUEST_WINDOW = 128
 
@@ -95,6 +97,8 @@ class Supervisor:
         self.body_servo_watch = False
         self.body_watch_lock = asyncio.Lock()
         self.local_session = Session(secrets.randbits(63) + 1, 0, (), "head-buttons")
+        from .game import Goalkeeper
+        self.game = Goalkeeper(self)
 
     def spawn(self, coroutine):
         task = asyncio.create_task(coroutine)
@@ -167,9 +171,7 @@ class Supervisor:
         self.voice.say("Ready")
 
     async def _head_command(self, op, body):
-        if op == "game.start":
-            raise Fault("football_unavailable", "Football worker is not implemented")
-        if op == "test.start":
+        if op in ("test.start", "game.start"):
             await self.dispatch(self.local_session, "control.acquire", {})
             try:
                 await self.dispatch(self.local_session, "mode.set", {
@@ -362,8 +364,13 @@ class Supervisor:
         if not self.motion_ready:
             raise Fault("stop_unconfirmed", "Retry forced control acquisition to confirm the body queue reset", True)
 
+    def require_game_idle(self):
+        if self.game.info['running'] or self.game.starting:
+            raise Fault('busy', 'Stop goalkeeper before changing motion or capture configuration')
+
     async def _take_control(self, session):
         """Called under control_lock. Revoke first, then reset via urgent IPC."""
+        await self.game.stop('control_takeover')
         previous = self.owner
         old = self.local_session if previous == self.local_session.id else self.sessions.get(previous)
         self.owner = session.id
@@ -415,7 +422,26 @@ class Supervisor:
                     session.last_drive_error = time.monotonic()
                     self.send(session, "event", "motion.rejected", {"error": exc.as_dict()})
 
-    async def dispatch(self, session, op, body):
+    async def dispatch(self, session, op, body, *, _from_game=False):
+        if op == "game.status":
+            return self.game.state()
+        if op in ("game.start", "game.stop"):
+            self.require_control(session, body)
+            if op == "game.stop":
+                return await self.game.stop()
+            generation = self.game.generation
+            async with self.parameter_lock:
+                self.require_control(session, body)
+                if generation != self.game.generation:
+                    raise Fault('cancelled', 'Game start discarded at stop barrier')
+                return await self.game.start(session, body)
+        if op in ('motion.stop_hard', 'motion.stop_graceful') or (op == 'mode.set' and body.get('mode') == 'IDLE'):
+            self.require_control(session, body)
+            await self.game.stop('operator_stop')
+        elif (self.game.info['running'] or self.game.starting) and not _from_game:
+            if (op.startswith(('motion.', 'test.', 'camera.', 'detection.', 'localisation.', 'params.'))
+                  and op not in READ_ONLY) or op in ('mode.set', 'system.restart_stream_worker', 'job.cancel'):
+                raise Fault('busy', 'Stop goalkeeper before changing motion or capture configuration')
         if op not in OPS:
             raise Fault("not_supported", op)
         if op == "session.heartbeat":
@@ -431,7 +457,8 @@ class Supervisor:
                     "capture_backends": ["libcamera-iceoryx2"],
                     "detectors": ["colour_blobs"],
                     "localisation": {"mode": "diagnostic_only", "motion_pose": False},
-                    "future": ["osd", "game", "servo-parameters"],
+                    "game": {"strategies": ["FIRA_penalty_Goalkeeper"], "observe_only_default": True},
+                    "future": ["osd", "servo-parameters"],
                     "hardware_slots": False, "simulated": bool(self.config.get("simulate"))}
         if op == "system.status":
             return {"state": self.mode, "owner": self.owner, "boot_id": self.boot_id,
@@ -497,6 +524,7 @@ class Supervisor:
             if op.endswith('.save'):
                 return {'values': await self._set_parameters(values), 'saved': True}
             async with self.parameter_lock:
+                self.require_game_idle()
                 values = {key:self.params.validate(key,value) for key,value in values.items()}
                 self.require_control(session, body)
                 await self.workers['camera'].call('params.apply', values)
@@ -523,6 +551,7 @@ class Supervisor:
             from .wire import choice
             group=choice(body,'group','all',('all','exposure','white_balance'))
             async with self.capture_lock:
+                self.require_game_idle()
                 self.require_control(session,body)
                 state=await self.workers['camera'].call('camera.status')
                 measured=state.get('measured_controls');age=state.get('measured_age_ms')
@@ -539,6 +568,7 @@ class Supervisor:
                     values.update({'camera.awb_enabled':False,'camera.white_balance.red_gain':gains[0],
                                    'camera.white_balance.blue_gain':gains[1]})
                 async with self.parameter_lock:
+                    self.require_game_idle()
                     values = {key:self.params.validate(key,value) for key,value in values.items()}
                     await self.workers['camera'].call('params.apply', values)
                 return {'values':values,'saved':False,'source_sequence':measured['sequence']}
@@ -594,6 +624,7 @@ class Supervisor:
             return await self.workers["localisation"].call(op, body)
         if op in ("localisation.start", "localisation.stop"):
             async with self.capture_lock:
+                self.require_game_idle()
                 self.require_control(session, body)
                 if op == "localisation.stop":
                     await self.workers["stream"].call("videostream.stop_localisation")
@@ -615,6 +646,7 @@ class Supervisor:
             return await self.workers["detection"].call(op)
         if op in ("detection.start", "detection.stop"):
             async with self.capture_lock:
+                self.require_game_idle()
                 self.require_control(session, body)
                 if op == "detection.start":
                     if self.mode != "MANUAL":
@@ -629,10 +661,12 @@ class Supervisor:
             if set(body) - {'frame_duration_us', 'exposure_us', 'gain', 'lease_epoch'}:
                 raise Fault('invalid_argument', 'Unknown camera start setting; geometry is fixed')
             async with self.capture_lock:
+                if not _from_game:
+                    self.require_game_idle()
                 self.require_control(session, body)
                 if op == "camera.stop":
                     return await self._stop_capture()
-                if self.mode != "MANUAL":
+                if self.mode != "MANUAL" and not (_from_game and self.mode == 'GAME'):
                     raise Fault("invalid_state", "Select MANUAL mode")
                 stream = await self.workers["stream"].call("state")
                 if any(s["source"]=="direct-gst" for s in stream.get("active_streams",[])):
@@ -819,6 +853,7 @@ class Supervisor:
 
     async def _set_parameters(self, values, expected=None):
         async with self.parameter_lock:
+            self.require_game_idle()
             if expected is not None and any(self.params.values.get(k)!=v for k,v in expected.items()):
                 raise Fault('conflict','Parameter changed; reload before saving')
             values = {k: self.params.validate(k, v) for k, v in values.items()}
@@ -870,6 +905,8 @@ class Supervisor:
             await worker.call("calibration.resolve", {"job_id": ident, "error": error})
 
     def _snapshot(self, topic):
+        if topic == 'game.state':
+            return self.game.state()
         if topic in BODY_TOPICS:
             return dict(self.body_telemetry.get(topic, {}))
         if topic == "system.workers":
@@ -881,6 +918,9 @@ class Supervisor:
         return dict(worker.state) if worker else {"state": "starting"}
 
     def _sample(self, topic):
+        if topic == 'game.state':
+            return {'topic': topic, 'valid': True, 'source_mono_ns': time.monotonic_ns(),
+                    'age_ms': 0, 'data': self.game.state()}
         if topic in BODY_TOPICS:
             data = self._snapshot(topic)
             source = data.get("source_mono_ns")
@@ -971,6 +1011,7 @@ class Supervisor:
         async with self.control_lock:
             if self.owner != session.id:
                 return
+            await self.game.stop('control_released')
             self.owner = None
             session.latest_drive = None
             try:
@@ -1032,6 +1073,7 @@ class Supervisor:
 
     async def close(self):
         self.closing = True
+        await self.game.stop('shutdown')
         if self.button_task:
             self.button_task.cancel()
             await asyncio.gather(self.button_task, return_exceptions=True)

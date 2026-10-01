@@ -32,7 +32,8 @@ def menu_tree():
     return Item("Main menu", (
         Item("Game", (Item("Football", (
             Item("Goalkeeper", (Item("Start", op="game.start",
-                 args={"strategy": "FIRA_penalty_Goalkeeper", "delay_seconds": 0}),)),
+                 args={"strategy": "FIRA_penalty_Goalkeeper", "delay_seconds": 0, "observe_only": False}),
+                 Item("Observe only", op="game.start", args={"strategy": "FIRA_penalty_Goalkeeper", "observe_only": True}))),
             Item("Forward", (
                 Item("Left", (forward("left"),)),
                 Item("Center", (forward("center"), forward("center", 10))),
@@ -62,6 +63,7 @@ class HeadMenu:
         self.cancel_requested = False
         self.stopping = False
         self.finishing = False
+        self.game_active = False
 
     @property
     def selected(self):
@@ -108,9 +110,16 @@ class HeadMenu:
 
     async def _start(self, item):
         try:
+            self.game_active = item.op == 'game.start'
             result = await self.command(item.op, dict(item.args))
             self.job = result["job_id"]
             ident = self.job
+            if self.game_active:
+                self.say('Goalkeeper observing' if result['observe_only'] else 'Goalkeeper started')
+                if self.cancel_requested:
+                    await self._cancel()
+                await self.game_finished(await self.command('game.status', {}))
+                return
             self.say("Test started")
             if self.cancel_requested:
                 await self._cancel()
@@ -118,11 +127,16 @@ class HeadMenu:
             status = await self.command("job.status", {"job_id": ident})
             await self._finish(status)
         except Exception as exc:
+            self.game_active = False
             self._error(exc)
             if self.job is None:
                 await self.release()
 
     async def _cancel(self):
+        if self.game_active:
+            self.stopping = True
+            await self.game_finished(await self.command('game.stop', {}))
+            return
         try:
             await self.command("job.cancel", {"job_id": self.job})
             self.stopping = True
@@ -138,6 +152,8 @@ class HeadMenu:
             self._error(exc)
 
     async def _finish(self, status):
+        if self.game_active:
+            return
         if status.get("job_id") != self.job or not self.job:
             return
         if status.get("status") not in ("completed", "cancelled", "failed"):
@@ -164,8 +180,22 @@ class HeadMenu:
         if self.action and not self.action.done():
             self.action.cancel()
         self.job = None
+        self.game_active = False
         self.stopping = self.cancel_requested = False
         self.say("Operator control")
+
+    async def game_finished(self, status):
+        if not self.game_active or status.get('running') or status.get('job_id') != self.job:
+            return
+        self.game_active = False
+        self.job = None
+        self.finishing = True
+        try:
+            await self.release()
+        finally:
+            self.finishing = False
+        self.say('Goalkeeper failed' if status.get('state') == 'failed' else 'Goalkeeper stopped')
+        self.stopping = self.cancel_requested = False
 
     async def close(self):
         if self.action:

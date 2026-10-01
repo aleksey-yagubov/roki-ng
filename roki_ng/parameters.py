@@ -21,6 +21,19 @@ COLOUR_DEFAULTS = {
 }
 
 SCHEMA = {
+    'game.geometry_verified': ('bool', False, None, None, 'next_game', 'Camera height and projection verified in goalkeeper crouch; required for physical game'),
+    'game.camera_height_m': ('float', .4068, .2, .8, 'next_game', 'Measured optical centre height in goalkeeper posture, metres'),
+    'game.head_tilt': ('int', -1500, -2600, 950, 'next_game', 'Fixed FIRA head tilt; head pan is centered'),
+    'game.ball_max_distance_m': ('float', 3., .3, 4., 'next_game', 'Maximum usable ball distance'),
+    'game.ball_min_circularity': ('float', .65, .3, 1., 'next_game', 'Minimum orange contour circularity'),
+    'game.deadband_m': ('float', .1, .05, .3, 'next_game', 'Lateral ball deadband, metres'),
+    'game.max_heading_error_rad': ('float', .2, .05, .35, 'next_game', 'Stop when yaw drifts from initial heading'),
+    'game.ball_loss_timeout_s': ('float', 3., .5, 10., 'next_game', 'Stop physical game when no valid ball is available'),
+    'game.side_step_mm': ('float', 10., 1., 10., 'next_game', 'Autonomous lateral gait amplitude, independent of manual speed'),
+    'game.step_cycles': ('int', 1, 1, 2, 'next_game', 'Finite cycles per goalkeeper correction'),
+    'game.step_budget_m': ('float', .1, .1, .2, 'next_game', 'Conservative path reservation per correction; not measured odometry'),
+    'game.max_path_m': ('float', .3, .1, 1., 'next_game', 'Total reserved path before explicit restart'),
+    'game.max_excursion_m': ('float', .3, .1, .5, 'next_game', 'Maximum signed reserved lateral excursion'),
     'camera.exposure_us': ('int',8000,1,100000,'next_request','Manual exposure in microseconds; must fit frame period'),
     'camera.analogue_gain': ('float',1.,1.,16.,'next_request','Manual analogue gain'),
     'camera.ae_enabled': ('bool',False,None,None,'next_request','Automatic exposure; manual values retained when enabled'),

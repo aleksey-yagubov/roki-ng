@@ -419,6 +419,14 @@ class Body:
             raise Fault("busy", "Motion already running; command discarded", True)
         if self.error:
             raise Fault("motion_fault", self.error)
+        if op == "game.step":
+            direction = choice(args, "direction", None, ("left", "right"))
+            heading = number(args, "heading", None, -math.pi, math.pi)
+            side = number(args, "side_mm", 10., 1., 10.)
+            cycles = number(args, "cycles", 1, 1, 2, True)
+            if self.pose != "crouch":
+                raise Fault("invalid_state", "Goalkeeper step requires prepared crouch")
+            return self._start(op, self._game_step(direction, heading, side, cycles))
         if op == "motion.pose":
             name = choice(args, "name", None, ("base_stand", "crouch", "stand", "head_field"))
             if name == "crouch" and choice(args, "crouch", "on", ("on", "centered")) == "centered":
@@ -813,6 +821,27 @@ class Body:
         self.pose = name
         if name in ("stand", "base_stand"):
             self.engine = None
+
+    def _game_step(self, direction, heading, side, cycles):
+        # Finite autonomous primitive: do not inherit manual drive scaling.
+        right_first = direction == "right"
+        for cycle in range(cycles):
+            measured = quaternion_yaw(self.read_body_quaternion())
+            error = wrap(measured - heading)
+            if abs(error) > .35:
+                raise Fault("imu_invalid", "Goalkeeper heading changed")
+            rotation = max(-.15, min(.15, error * (-1 if right_first else 1)))
+            if self.simulated:
+                yield "sleep", .08
+            else:
+                engine = self._engine()
+                engine.first_Leg_Is_Right_Leg = right_first
+                yield from engine.walk_Cycle(0, side, rotation, cycle, 1000000)
+            yield "drain",
+        if not self.simulated:
+            yield from self._engine().walk_Cycle(0, 0, 0, 0, 1)
+        yield "drain",
+        self.pose = "crouch"
 
     def _walk(self, cycles=None, fixed=None):
         if self.pose != "crouch":

@@ -1,4 +1,4 @@
-"""LAB connected components for tuning; not yet ball classification or projection."""
+"""LAB tuning plus an independent synchronized ball observation worker."""
 
 import math
 import time
@@ -31,6 +31,8 @@ def colour_blobs(image, parameters, profile):
 
 class Detection:
     def __init__(self, config, emit, log):
+        from .ball_observation import BallObservation
+        self.ball = BallObservation(config)
         self.emit, self.log = emit, log
         self.parameters = config["parameters"]
         self.reader = self.publisher = None
@@ -47,6 +49,13 @@ class Detection:
                 "age_ms": round((time.monotonic() - self.last_frame_at) * 1000) if self.result else None}
 
     def command(self, op, args):
+        if op == "ball.start":
+            return self.ball.start(args)
+        if op == "ball.stop":
+            self.ball.close()
+            return self.ball.state()
+        if op == "ball.status":
+            return self.ball.state()
         if op in ("state", "detection.status"):
             return self.state()
         if op == "params.apply":
@@ -55,7 +64,7 @@ class Detection:
             self.parameters = updated
             return {}
         if op == "detection.stop":
-            self.close()
+            self._close_tuning()
             return self.state()
         if op == "detection.start":
             if self.reader:
@@ -70,7 +79,7 @@ class Detection:
                 self.last_frame_at = time.monotonic()
                 self.reader = FrameReader(self._consume)
             except Exception:
-                self.close()
+                self._close_tuning()
                 raise
             self.log("INFO", f"LAB detector started: {self.profile}")
             return self.state()
@@ -111,11 +120,17 @@ class Detection:
                 error = str(exc)
         if error:
             self.error = error[:240]
-            self.close()
+            self._close_tuning()
             self.log("ERROR", self.error)
             self.emit("detection.fault", self.state())
 
     def close(self):
+        try:
+            self.ball.close()
+        finally:
+            self._close_tuning()
+
+    def _close_tuning(self):
         if self.reader:
             self.reader.close()
             self.reader = None
