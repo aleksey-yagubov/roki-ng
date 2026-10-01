@@ -301,12 +301,12 @@ def test_datastreams_are_requested_shared_fresh_and_fit_udp(tmp_path):
         server.sessions = {1: first, 2: second}
         for session in (first, second):
             await server._data(session, "data.subscribe", {"topic": "body.imu"})
-        assert calls == [("body.telemetry.watch", {"enabled": True})]
+        assert calls == [("body.telemetry.watch", {"enabled": True, "imu": True, "power": False})]
         await server._data(first, "data.unsubscribe", {"subscription_id": "body.imu"})
         assert len(calls) == 1
         second.closed = True
         await server._sync_body_watch()
-        assert calls[-1] == ("body.telemetry.watch", {"enabled": False})
+        assert calls[-1] == ("body.telemetry.watch", {"enabled": False, "imu": False, "power": False})
         assert not server._sample("body.imu")["valid"]
         imu = BodyImu()
         imu.read(SimpleNamespace(body_quaternion=lambda: quaternion(0)))

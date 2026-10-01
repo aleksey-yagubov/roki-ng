@@ -17,6 +17,7 @@ from .calibration import quaternion_yaw, wrap
 from .motion import slots
 from .body_imu import BodyImu
 from .body_servos import BodyServos
+from .body_power import BodyPower
 from .stabilization import CrouchStabilizer
 from .stabilization_diagnostics import StabilizationDiagnostics
 
@@ -115,8 +116,18 @@ class RokiHardware:
             raise Fault("servo_data_invalid", "Body positions response must contain 60 bytes")
         return struct.unpack("<30h", bytes(raw))
 
+    def body_power_adc(self):
+        ok, raw = self.rcb.moveRamToComCmdSynchronize(0x00CC, 2)
+        self.check(ok, self.rcb)
+        if len(raw) != 2:
+            raise Fault("power_data_invalid", "Body power response must contain 2 bytes")
+        return struct.unpack("<H", bytes(raw))[0]
+
 
 class SimHardware:
+    def body_power_adc(self):
+        return 3242
+
     def body_positions(self):
         # Synthetic neutral feedback; never pretend it follows commanded targets.
         return (0,) * 30
@@ -186,6 +197,9 @@ class Body:
         self.body_servos = BodyServos(self.model)
         self.servo_watch = False
         self.body_imu = BodyImu()
+        self.body_power = BodyPower(self.simulated)
+        self.power_watch = False
+        self.imu_watch = False
         self.stabilizer = CrouchStabilizer()
         self.stabilization_diagnostics = StabilizationDiagnostics()
         self.telemetry_watch = False
@@ -242,17 +256,21 @@ class Body:
         if op == "body.telemetry.watch":
             self.telemetry_watch = boolean(args, "enabled", False)
             self.servo_watch = self.telemetry_watch and boolean(args, "servos", False)
+            self.imu_watch = self.telemetry_watch and boolean(args, "imu", True)
+            self.power_watch = self.telemetry_watch and boolean(args, "power", False)
             self.telemetry_at = 0
             return {}
         if op == "body.telemetry.read":
             if self.body_connected:
                 try:
-                    if boolean(args, "servos", False):
+                    if boolean(args, "power", False):
+                        self.body_power.read(self.hardware)
+                    elif boolean(args, "servos", False):
                         self.body_servos.read(self)
                     else:
                         self.read_body_quaternion(max_age=0.02)
                 except Fault as exc:
-                    if exc.code not in ("body_busy", "imu_invalid", "servo_data_invalid"):
+                    if exc.code not in ("body_busy", "imu_invalid", "servo_data_invalid", "power_data_invalid"):
                         raise
             return self._body_telemetry()
         if op == "control.takeover":
@@ -548,6 +566,7 @@ class Body:
             return
         self._tick_body_imu()
         self._tick_body_servos()
+        self._tick_body_power()
         if not self.body_connected:
             return
         if not self.plan:
@@ -609,6 +628,7 @@ class Body:
     def _body_telemetry(self):
         now = time.monotonic()
         return {"body.imu": self.body_imu.state(now),
+                "body.power": self.body_power.state(now),
                 "body.servos": self.body_servos.state(now),
                 "body.stabilization": self.stabilizer.state(self.parameters) | {
                     "diagnostics": self.stabilization_diagnostics.result,
@@ -631,7 +651,7 @@ class Body:
             self.emit("body.telemetry", self._body_telemetry())
 
     def _tick_body_imu(self):
-        if not (self.telemetry_watch or self.parameters["body_imu.poll_enabled"]
+        if not (self.imu_watch or self.parameters["body_imu.poll_enabled"]
                 or self.parameters["stabilization.diagnostics_enabled"]
                 or self.parameters["stabilization.enabled"]):
             return
@@ -681,6 +701,23 @@ class Body:
             if exc.code == "servo_data_invalid":
                 if self.body_servos.invalid == 1 or self.body_servos.invalid % 25 == 0:
                     self.log("WARNING", f"Body positions rejected: {exc}")
+            elif exc.code != "body_busy":
+                self._link_lost(exc)
+        except OSError as exc:
+            self._link_lost(exc)
+
+    def _tick_body_power(self):
+        now = time.monotonic()
+        if (not self.body_connected or not self.power_watch
+                or now < self.body_power.next_at
+                or (self.plan and now >= self.next_at)):
+            return
+        try:
+            self.body_power.read(self.hardware)
+        except Fault as exc:
+            if exc.code == "power_data_invalid":
+                if self.body_power.invalid == 1 or self.body_power.invalid % 25 == 0:
+                    self.log("WARNING", f"Body power rejected: {exc}")
             elif exc.code != "body_busy":
                 self._link_lost(exc)
         except OSError as exc:
@@ -748,6 +785,7 @@ class Body:
         self.target_times.clear()
         self.body_servos.invalidate("link_lost")
         self.body_imu.invalidate(str(exc)[:240])
+        self.body_power.invalidate(str(exc)[:240])
         self.stabilizer.reset("link_lost")
         self.error = str(exc)[:240]
         self._finish("failed", self.error)

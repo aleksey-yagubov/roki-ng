@@ -553,7 +553,7 @@ UnicamSequence RTP extension и MessagePack OSD этим этапом не ре�
 ## Запрашиваемые datastream
 
 Доступны `system.workers`, `motion.state`, `camera.state`, `videostream.state`,
-`detection.state`, `localisation.state`, `body.imu`, `body.stabilization`, `body.servos`.
+`detection.state`, `localisation.state`, `body.imu`, `body.stabilization`, `body.servos`, `body.power`.
 Состояния workers являются snapshots состояния
 процессов, не измеренной телеметрией серв/IMU. Body state:
 state (ready/fault), pose, active_job, head (заданные ticks), error, simulated.
@@ -599,9 +599,9 @@ iceoryx2 сервис roki/detection/blobs/v1 публикует MessagePack р�
 
 | Операция | Аргументы | Результат |
 | --- | --- | --- |
-| `data.list` | `{}` | items: name, kind=state, max_rate_hz=10, schema=1 |
+| `data.list` | `{}` | items: name, kind=state, max_rate_hz (зависит от topic), schema=1 |
 | `data.snapshot` | topic | topic, valid, source_mono_ns, age_ms, data |
-| `data.subscribe` | topic, rate_hz [0.2,10], default 2 | subscription_id=topic, rate_hz |
+| `data.subscribe` | topic, rate_hz [0.2,max_rate_hz], default min(2,max_rate_hz) | subscription_id=topic, rate_hz |
 | `data.update` | topic, rate_hz | То же, заменяет подписку |
 | `data.unsubscribe` | subscription_id | `{}` |
 
@@ -612,6 +612,48 @@ iceoryx2 сервис roki/detection/blobs/v1 публикует MessagePack р�
 не делает его аппаратной телеметрией. Timestamp соответствует получению heartbeat,
 а не моменту измерения. `valid=false` после потери worker-а; старые поля могут
 оставаться диагностическими и не должны рисоваться как актуальные измерения.
+
+### Напряжение аккумулятора
+
+`body.power` доступен любому подключённому наблюдателю, без захвата управления,
+запуска камеры или движений. `max_rate_hz=1`, по умолчанию 1 Гц; допустимо 0.2..1 Гц.
+
+```json
+{"op":"data.subscribe","body":{"topic":"body.power","rate_hz":1}}
+```
+
+Это поля op/body внутри обычного конверта запроса. Разовое получение:
+`data.snapshot {"topic":"body.power"}`; отключение:
+`data.unsubscribe {"subscription_id":"body.power"}`.
+Ответ/событие использует стандартные `valid`, `source_mono_ns`, `age_ms`, `data`.
+
+`body.power.data`:
+
+- `voltage_v`: напряжение в вольтах (float) или null, **не процент заряда**;
+- `adc_raw`: исходное беззнаковое 16-битное значение или null;
+- `valid`, `source_mono_ns`, `timestamp_kind="host_receive"`;
+- `sequence`: счётчик успешных чтений, не номер измерения АЦП;
+- `simulated`: синтетические значения в режиме симуляции;
+- `busy_reads`, `invalid_reads`, `error`: диагностика чтения.
+
+Motherboard-worker читает два байта little-endian по адресу Зубра `0xCC` через
+Roki и считает `voltage_v = adc_raw * 10.0 / 2702.0`. Это коэффициент прошивки
+Зубра, не индивидуальная метрологическая калибровка платы; GUI не пересчитывает ADC.
+Например, 3242 соответствует примерно 12.00 В. Порогов процентов заряда и
+автоматической остановки робота этот источник не добавляет.
+
+Все подписчики используют один опрос с периодом 1 с. Разовый snapshot использует
+кеш младше 1 с либо делает чтение; сам по себе постоянный опрос не включает.
+Приоритет имеют команды движений. Busy не разрывает связь: остаётся прежнее
+значение с прежним timestamp. После 3 с без успешного чтения `valid=false`;
+устаревшие числа нельзя отображать как текущие. При ошибке связи/ответа значения
+и timestamp очищаются в null, а не заменяются на 0 В. Timestamp означает
+получение ответа на голове, не момент преобразования АЦП в контроллере.
+
+Подписка только на `body.power` не включает опрос IMU/позиций серв. После
+отписки/закрытия/истечения последней подписанной сессии опрос напряжения прекращается;
+остальные подписки продолжают работать. При отключённом теле или недоступном
+motherboard-worker данные невалидны.
 
 ### IMU тела и удержание приседа
 

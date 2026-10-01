@@ -142,3 +142,19 @@ pitch/поправка/причина, затем nominal/sent/measured для I
 source_mono_ns, hip_error_deg=[R,L], consecutive=[R,L]. Это наблюдение,
 не новый контур управления. WARNING означает устойчивое расхождение, не
 доказанный отказ мотора; свежесть каждой сервы всё ещё неизвестна.
+
+## Напряжение аккумулятора: body.power
+
+Добавлен источник `body.power` в `data.list`, стандартные `data.snapshot`,
+`data.subscribe/update/unsubscribe`; нового типа пакетов нет. Доступен наблюдателю
+без управления, камеры и движений. Подписка:
+`data.subscribe {"topic":"body.power","rate_hz":1}` (максимум и default 1 Гц).
+
+В `data.sample.body.data`: `voltage_v` (готовые вольты), `adc_raw` (диагностика),
+`valid`, `source_mono_ns`, `timestamp_kind`, `sequence`, `simulated`,
+`busy_reads`, `invalid_reads`, `error`. Проверять `body.valid` и `body.age_ms`:
+после 3 с данные устарели. Не показывать null/ошибку как 0 В, не выдавать
+напряжение за процент заряда. При `simulated=true` обозначать симуляцию.
+Пересчёт ADC уже выполняет робот; GUI показывает, например, `12.04 В`.
+
+Полное описание: раздел «Напряжение аккумулятора» в `OPERATOR_PROTOCOL_V1.md`.

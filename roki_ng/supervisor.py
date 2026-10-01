@@ -43,7 +43,9 @@ READ_ONLY = {
     "params.keys", "params.describe", "params.get", "system.status", "system.capabilities",
     "system.operations", "session.heartbeat", "session.close",
 }
-BODY_TOPICS = ("body.imu", "body.stabilization", "body.servos")
+BODY_TOPICS = ("body.imu", "body.stabilization", "body.servos", "body.power")
+BODY_TOPIC_MAX_AGE_MS = {"body.imu": 150, "body.stabilization": 500, "body.servos": 600, "body.power": 3000}
+TOPIC_MAX_RATE_HZ = {"body.servos": 5, "body.power": 1}
 TOPICS = ("game.state", "system.workers", "motion.state", "camera.state", "videostream.state", "detection.state", "localisation.state", *BODY_TOPICS)
 LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
 REQUEST_WINDOW = 128
@@ -95,6 +97,8 @@ class Supervisor:
         self.body_telemetry = {}
         self.body_watch = False
         self.body_servo_watch = False
+        self.body_power_watch = False
+        self.body_imu_watch = False
         self.body_watch_lock = asyncio.Lock()
         self.local_session = Session(secrets.randbits(63) + 1, 0, (), "head-buttons")
         from .game import Goalkeeper
@@ -937,7 +941,7 @@ class Supervisor:
             source = data.get("source_mono_ns")
             age = (time.monotonic_ns() - source) / 1e6 if source is not None else None
             worker = self.workers.get("motherboard")
-            limit = {"body.imu": 150, "body.stabilization": 500, "body.servos": 600}[topic]
+            limit = BODY_TOPIC_MAX_AGE_MS[topic]
             valid = bool(worker and worker.alive and data.get("valid")
                          and age is not None and 0 <= age < limit)
             return {"topic": topic, "valid": valid, "source_mono_ns": source,
@@ -960,27 +964,35 @@ class Supervisor:
             wanted = any(not s.closed and any(t in s.data for t in BODY_TOPICS)
                          for s in self.sessions.values())
             servos = any(not s.closed and "body.servos" in s.data for s in self.sessions.values())
-            if wanted != self.body_watch or servos != self.body_servo_watch:
-                args = {"enabled": wanted}
+            power = any(not s.closed and "body.power" in s.data for s in self.sessions.values())
+            imu = any(not s.closed and any(t in s.data for t in BODY_TOPICS if t != "body.power")
+                      for s in self.sessions.values())
+            if (wanted != self.body_watch or servos != self.body_servo_watch
+                    or power != self.body_power_watch or imu != self.body_imu_watch):
+                args = {"enabled": wanted, "imu": imu, "power": power}
                 if servos or self.body_servo_watch:
                     args["servos"] = servos
                 await self.workers["motherboard"].call("body.telemetry.watch", args)
                 self.body_watch = wanted
                 self.body_servo_watch = servos
+                self.body_power_watch = power
+                self.body_imu_watch = imu
 
     async def _data(self, session, op, body):
         if op == "data.list":
-            return {"items": [{"name": t, "kind": "state", "max_rate_hz": 5 if t == "body.servos" else 10,
+            return {"items": [{"name": t, "kind": "state", "max_rate_hz": TOPIC_MAX_RATE_HZ.get(t, 10),
                                "schema": 1} for t in TOPICS]}
         if op == "data.snapshot":
             if body.get("topic") in BODY_TOPICS:
-                args = {"servos": True} if body["topic"] == "body.servos" else {}
+                flag = {"body.servos": "servos", "body.power": "power"}.get(body["topic"])
+                args = {flag: True} if flag else {}
                 self.body_telemetry = await self.workers["motherboard"].call("body.telemetry.read", args)
             return self._sample(body.get("topic"))
         if op in ("data.subscribe", "data.update"):
             topic = body.get("topic")
             self._snapshot(topic)
-            rate = number(body, "rate_hz", 2, 0.2, 5 if topic == "body.servos" else 10)
+            max_rate = TOPIC_MAX_RATE_HZ.get(topic, 10)
+            rate = number(body, "rate_hz", min(2, max_rate), 0.2, max_rate)
             session.data[topic] = {"rate": rate, "next": 0, "sequence": 0}
             if topic in BODY_TOPICS:
                 try:
