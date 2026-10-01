@@ -62,6 +62,7 @@ class Detection:
             updated = self.parameters | args
             validate_colour_ranges(updated)
             self.parameters = updated
+            self.ball.apply_parameters(args)
             return {}
         if op == "detection.stop":
             self._close_tuning()

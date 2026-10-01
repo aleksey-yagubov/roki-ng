@@ -167,9 +167,13 @@ class Goalkeeper:
                 if time.monotonic() > until:
                     raise Fault('timeout', 'Camera/IMU alignment timed out')
                 await asyncio.sleep(.1)
-            ball_started = True  # Stop even if command reply is lost.
-            await self._call('detection', 'ball.start', {'parameters': p,
-                'unicam_minus_stm': camera['imu_sync']['unicam_minus_stm']}, timeout=5)
+            async with self.s.parameter_lock:
+                # Threshold edits made during preparation must not be overwritten
+                # by the fixed motion/geometry snapshot from game.start.
+                current = p | {k:v for k,v in self.s.params.values.items() if k.startswith('vision.')}
+                ball_started = True  # Stop even if command reply is lost.
+                await self._call('detection', 'ball.start', {'parameters': current,
+                    'unicam_minus_stm': camera['imu_sync']['unicam_minus_stm']}, timeout=5)
             self.info['state'] = 'observing' if observe else 'tracking'
             last_sequence = -1
             minimum_stamp = 0

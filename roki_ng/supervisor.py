@@ -368,6 +368,12 @@ class Supervisor:
         if self.game.info['running'] or self.game.starting:
             raise Fault('busy', 'Stop goalkeeper before changing motion or capture configuration')
 
+    def require_game_parameters(self, values):
+        if self.game.info['running'] or self.game.starting:
+            if any(SCHEMA[key][4] not in ('live', 'next_frame', 'next_request', 'next_localisation')
+                   for key in values):
+                raise Fault('busy', 'Stop goalkeeper before changing motion or game geometry parameters')
+
     async def _take_control(self, session):
         """Called under control_lock. Revoke first, then reset via urgent IPC."""
         await self.game.stop('control_takeover', hard=True)
@@ -441,8 +447,8 @@ class Supervisor:
             self.require_control(session, body)
             await self.game.stop('operator_stop', hard=op == 'motion.stop_hard')
         elif (self.game.info['running'] or self.game.starting) and not _from_game:
-            if (op.startswith(('motion.', 'test.', 'camera.', 'detection.', 'localisation.', 'params.'))
-                  and op not in READ_ONLY) or op in ('mode.set', 'system.restart_stream_worker', 'job.cancel'):
+            if (op.startswith(('motion.', 'test.')) and op not in READ_ONLY) or op in (
+                    'camera.start', 'camera.stop', 'mode.set', 'system.restart_stream_worker', 'job.cancel'):
                 raise Fault('busy', 'Stop goalkeeper before changing motion or capture configuration')
         if op not in OPS:
             raise Fault("not_supported", op)
@@ -528,8 +534,8 @@ class Supervisor:
             if op.endswith('.save'):
                 return {'values': await self._set_parameters(values), 'saved': True}
             async with self.parameter_lock:
-                self.require_game_idle()
                 values = {key:self.params.validate(key,value) for key,value in values.items()}
+                self.require_game_parameters(values)
                 self.require_control(session, body)
                 await self.workers['camera'].call('params.apply', values)
                 return {'values': values, 'saved': False}
@@ -555,7 +561,6 @@ class Supervisor:
             from .wire import choice
             group=choice(body,'group','all',('all','exposure','white_balance'))
             async with self.capture_lock:
-                self.require_game_idle()
                 self.require_control(session,body)
                 state=await self.workers['camera'].call('camera.status')
                 measured=state.get('measured_controls');age=state.get('measured_age_ms')
@@ -572,8 +577,9 @@ class Supervisor:
                     values.update({'camera.awb_enabled':False,'camera.white_balance.red_gain':gains[0],
                                    'camera.white_balance.blue_gain':gains[1]})
                 async with self.parameter_lock:
-                    self.require_game_idle()
                     values = {key:self.params.validate(key,value) for key,value in values.items()}
+                    self.require_game_parameters(values)
+                    self.require_control(session,body)
                     await self.workers['camera'].call('params.apply', values)
                 return {'values':values,'saved':False,'source_sequence':measured['sequence']}
         if op == "test.measure":
@@ -628,13 +634,12 @@ class Supervisor:
             return await self.workers["localisation"].call(op, body)
         if op in ("localisation.start", "localisation.stop"):
             async with self.capture_lock:
-                self.require_game_idle()
                 self.require_control(session, body)
                 if op == "localisation.stop":
                     await self.workers["stream"].call("videostream.stop_localisation")
                     return await self.workers["localisation"].call(op)
-                if self.mode != "MANUAL":
-                    raise Fault("invalid_state", "Select MANUAL mode")
+                if self.mode not in ("MANUAL", "GAME"):
+                    raise Fault("invalid_state", "Select MANUAL or start game")
                 camera = await self.workers["camera"].call("camera.status")
                 sync = camera.get("imu_sync", {})
                 if not camera.get("running") or sync.get("state") != "synced":
@@ -650,11 +655,10 @@ class Supervisor:
             return await self.workers["detection"].call(op)
         if op in ("detection.start", "detection.stop"):
             async with self.capture_lock:
-                self.require_game_idle()
                 self.require_control(session, body)
                 if op == "detection.start":
-                    if self.mode != "MANUAL":
-                        raise Fault("invalid_state", "Select MANUAL mode")
+                    if self.mode not in ("MANUAL", "GAME"):
+                        raise Fault("invalid_state", "Select MANUAL or start game")
                     if not (await self.workers["camera"].call("camera.status"))["running"]:
                         raise Fault("not_ready", "Start runtime camera before detection")
                 return await self.workers["detection"].call(op, body)
@@ -860,10 +864,10 @@ class Supervisor:
 
     async def _set_parameters(self, values, expected=None):
         async with self.parameter_lock:
-            self.require_game_idle()
             if expected is not None and any(self.params.values.get(k)!=v for k,v in expected.items()):
                 raise Fault('conflict','Parameter changed; reload before saving')
             values = {k: self.params.validate(k, v) for k, v in values.items()}
+            self.require_game_parameters(values)
             validate_colour_ranges(self.params.values | values)
             applied = []
             try:

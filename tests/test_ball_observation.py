@@ -117,3 +117,18 @@ def test_exposure_age_includes_camera_queue_delay():
     assert tracker.update([candidate()], 1, 1_000_000_000, exposed, 10.)['reason'] == 'stale'
     future = capture_time(3_000_000_000, 2_000_000_000, 10.)
     assert tracker.update([candidate()], 2, 3_000_000_000, future, 10.)['reason'] == 'stale'
+
+
+def test_threshold_edits_reach_ball_and_invalidate_old_result(tmp_path):
+    detector = Detection(dict(parameters=parameters(),state_dir=str(tmp_path)),lambda *a:None,lambda *a:None)
+    old = detector.ball.parameters
+    for seq in range(1,4):
+        detector.ball.tracker.update([candidate()],seq,seq,seq*.1,seq*.1)
+    assert detector.ball.tracker.result['valid']
+    detector.command('params.apply',{'vision.orange_ball.pixels_min':80})
+    assert detector.ball.parameters['vision.orange_ball.pixels_min']==80
+    assert old['vision.orange_ball.pixels_min']==50
+    assert detector.ball.parameter_revision==1
+    assert detector.ball.tracker.result['reason']=='parameters_changed'
+    assert not detector.ball.tracker.result['valid']
+    detector.close()

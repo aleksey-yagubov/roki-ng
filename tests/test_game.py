@@ -60,6 +60,7 @@ def setup(tmp_path):
     async def dispatch(*args, **kwargs):
         return {}
     s = SimpleNamespace(mode='MANUAL', owner=1, lease_epoch=1, workers=workers,
+                        parameter_lock=asyncio.Lock(),
                         motion_ready=True, head_menu=None, local_session=None,
                         params=Parameters(tmp_path), dispatch=dispatch,
                         require_motion_ready=lambda: None,
@@ -216,7 +217,8 @@ def test_supervisor_game_protocol_ownership_and_barriers(tmp_path):
         server.mode = 'GAME'
         assert (await server.dispatch(foreign, 'game.status', {}))['running']
         with pytest.raises(Fault): await server.dispatch(foreign, 'game.stop', {'lease_epoch': 3})
-        for op, args in [('motion.head', {'tilt': -1000}), ('params.set', {}), ('camera.stop', {})]:
+        for op, args in [('motion.head', {'tilt': -1000}),
+                         ('params.set', {'key':'walk.gait_height_mm','value':180}), ('camera.stop', {})]:
             with pytest.raises(Fault, match='Stop goalkeeper'):
                 await server.dispatch(owner, op, args | {'lease_epoch': 3})
         result = await server.dispatch(owner, 'game.stop', {'lease_epoch': 3})
@@ -424,4 +426,55 @@ def test_ball_loss_clock_counts_observations_during_step(tmp_path):
         assert game.last_seen == seen  # Repeated frame cannot refresh it.
         game._record_ball(observation(seq=2) | {'age_ms':501})
         assert game.last_seen == seen
+    asyncio.run(run())
+
+
+def test_game_allows_live_vision_isp_logging_and_diagnostic_settings(tmp_path):
+    from roki_ng.supervisor import Supervisor, Session
+    async def run():
+        s = Supervisor({'simulate':True,'state_dir':str(tmp_path)})
+        s.workers = {r:Worker(r) for r in ('motherboard','camera','detection','localisation')}
+        s.owner, s.lease_epoch, s.mode = 1, 3, 'GAME'
+        s.game.info['running'] = True
+        owner = Session(1,2,(),'owner')
+        values = {'vision.orange_ball.pixels_min':80,'camera.analogue_gain':2.,
+                  'logging.stdout_enabled':True,'localisation.max_speed_m_s':.4}
+        result = await s.dispatch(owner,'params.set',{'values':values,'lease_epoch':3})
+        assert result['values'] == values
+        assert not s.workers['motherboard'].calls
+        assert ('params.apply',{'vision.orange_ball.pixels_min':80}) in s.workers['detection'].calls
+        assert s.params.values['localisation.max_speed_m_s'] == .4
+        await s.dispatch(owner,'camera.controls.set',{'values':{'camera.analogue_gain':3.},'lease_epoch':3})
+        assert s.params.values['camera.analogue_gain'] == 2.  # Volatile ISP edit.
+        for key, value in (('walk.gait_height_mm',190), ('game.camera_height_m',.5), ('stabilization.enabled',True)):
+            with pytest.raises(Fault, match='Stop goalkeeper'):
+                await s.dispatch(owner,'params.set',{'key':key,'value':value,'lease_epoch':3})
+        assert s.game.info['running'] and s.mode=='GAME'
+    asyncio.run(run())
+
+
+def test_ball_start_uses_thresholds_changed_during_preparation(tmp_path):
+    async def run():
+        game, s, session = setup(tmp_path)
+        await game.start(session,{'strategy':'FIRA_penalty_Goalkeeper'})
+        s.params.values['vision.orange_ball.pixels_min'] = 123
+        await until(lambda:game.state()['state']=='observing')
+        args = next(args for op,args in s.workers['detection'].calls if op=='ball.start')
+        assert args['parameters']['vision.orange_ball.pixels_min']==123
+        await game.stop()
+    asyncio.run(run())
+
+
+def test_diagnostic_workers_can_be_controlled_during_game(tmp_path):
+    from roki_ng.supervisor import Supervisor, Session
+    async def run():
+        s = Supervisor({'simulate':True,'state_dir':str(tmp_path)})
+        s.workers = {r:Worker(r) for r in ('motherboard','camera','detection','localisation','stream')}
+        s.owner, s.lease_epoch, s.mode = 1, 3, 'GAME'
+        s.game.info['running'] = True
+        owner = Session(1,2,(),'owner')
+        for op in ('detection.start','detection.stop','localisation.start','localisation.stop'):
+            await s.dispatch(owner,op,{'lease_epoch':3})
+        assert not s.workers['motherboard'].calls
+        assert s.game.info['running'] and s.mode=='GAME'
     asyncio.run(run())

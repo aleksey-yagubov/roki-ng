@@ -119,6 +119,7 @@ class BallObservation:
     def __init__(self, config):
         self.directory = Path(config.get('state_dir', '.'))/'localisation'
         self.parameters = config['parameters']
+        self.parameter_revision = 0
         self.thread = None
         self.stop_event = threading.Event()
         self.lock = threading.Lock()
@@ -130,6 +131,14 @@ class BallObservation:
             age, result = self.tracker.state(time.monotonic())
             return dict(running=bool(self.thread and self.thread.is_alive() and not self.stop_event.is_set() and not self.error),
                         error=self.error, age_ms=age, result=result)
+
+    def apply_parameters(self, values):
+        with self.lock:
+            updated = self.parameters | values
+            if updated != self.parameters:
+                self.parameters = updated
+                self.parameter_revision += 1
+                self.tracker.invalidate('parameters_changed')
 
     def start(self, args):
         if self.thread and self.thread.is_alive():
@@ -220,9 +229,11 @@ class BallObservation:
                     continue
                 (header, data, received), imu = pair
                 image = np.frombuffer(data, np.uint8).reshape(650, 800, 3)
-                candidates = ball_candidates(image, self.parameters, projector, imu[2:6])
                 with self.lock:
-                    if not self.stop_event.is_set():
+                    parameters, revision = self.parameters, self.parameter_revision
+                candidates = ball_candidates(image, parameters, projector, imu[2:6])
+                with self.lock:
+                    if not self.stop_event.is_set() and revision == self.parameter_revision:
                         self.tracker.update(candidates, header[0], header[1], received, time.monotonic())
                 del image, data, pair
         except Exception as exc:

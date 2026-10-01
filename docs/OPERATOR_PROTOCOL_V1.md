@@ -569,7 +569,7 @@ result описывает цветовые области конкретного
 | Операция | Аргументы | Результат |
 | --- | --- | --- |
 | detection.list | {} | detector=colour_blobs, profiles, max_blobs=4, coordinates=image_pixels, classifies_ball=false |
-| detection.start | lease_epoch, profile (default orange_ball) | state; нужны MANUAL и работающий camera-worker |
+| detection.start | lease_epoch, profile (default orange_ball) | state; нужны MANUAL/GAME и работающий camera-worker |
 | detection.stop | lease_epoch | state с running=false, result=null |
 | detection.status | {} | актуальное состояние, доступно наблюдателю |
 
@@ -832,10 +832,34 @@ GUI-потока. Это не требует OpenCV на ПК.
 
 ## Следующие расширения
 
-Имена game.*, calibration.*, servo.*, osd.*, strategy.*, head_display.* пока
+Имена calibration.*, servo.*, osd.*, strategy.*, head_display.* пока
 зарезервированы архитектурой и возвращают not_supported. `runtime` camera,
-FrameRing/ImuRing и UI физических кнопок уже реализованы; нейроускоритель и
-локализация ещё нет. Для новых операций будут добавлены capabilities и schemas.
+FrameRing/ImuRing, UI физических кнопок, диагностическая локализация и ограниченный
+FIRA-вратарь реализованы; нейроускоритель ещё нет.
+
+## Управление игрой
+
+Это новый API roki-ng, не протокол старой Roki_2_Soccer. Доступность проверять
+через system.operations и system.capabilities.game.
+
+| Операция | Аргументы | Результат |
+| --- | --- | --- |
+| game.start | lease_epoch, strategy="FIRA_penalty_Goalkeeper", observe_only=true, delay_seconds=0 | Статус запуска с job_id; нужен MANUAL |
+| game.stop | lease_epoch | Статус после завершения текущего шага/подготовительной позы |
+| game.status | {} | Статус игры; доступен наблюдателям |
+
+Подписка: data.subscribe(topic="game.state"). Job_id игры не подходит к
+job.status/job.cancel; применять game.status/game.stop. Для аварийной остановки
+существует motion.stop_hard. Для физического старта обязательны проверенная
+геометрия и game.geometry_verified=true; по умолчанию только наблюдение.
+
+GAME не задаётся через mode.set. Игра продолжает работу после отключения GUI
+или control.release. Новая свободная lease не останавливает игру; force=true
+при control.acquire останавливает её аварийно и позволяет ручное управление.
+ISP/vision/logging доступны для редактирования во время игры; параметры походки
+и игровой геометрии заблокированы. Диагностическую локализацию и LAB-детектор
+можно запускать/останавливать независимо от игрового наблюдения мяча.
+Полный контракт и границы реализации: [FIRA_GOALKEEPER.md](FIRA_GOALKEEPER.md).
 
 Будущий video OSD следует [DISPLAY_PROTOCOL.md](DISPLAY_PROTOCOL.md): отдельный
 MessagePack sample с bbox/rotated rectangle/circle/text, привязка по UnicamSequence,
@@ -852,7 +876,7 @@ requested datastream, не OSD. Direct-gst не требует IMU и не сб�
 
 | Операция | Аргументы | Условия |
 | --- | --- | --- |
-| localisation.start | prior: [x_m, y_m, yaw_rad] | Lease, MANUAL, runtime camera running и IMU synced |
+| localisation.start | prior: [x_m, y_m, yaw_rad] | Lease, MANUAL/GAME, runtime camera running и IMU synced |
 | localisation.stop | {} | Lease |
 | localisation.status | {} | Read-only |
 
