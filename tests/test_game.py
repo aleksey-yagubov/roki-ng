@@ -401,3 +401,27 @@ def test_game_survives_operator_release_and_reacquisition(tmp_path, disconnect):
         await s.dispatch(viewer,'game.stop',lease)
         assert not s.game.state()['running'] and s.mode=='MANUAL'
     asyncio.run(run())
+
+
+def test_ball_loss_clock_counts_observations_during_step(tmp_path):
+    async def run():
+        game, s, _ = setup(tmp_path)
+        game.last_seen = time.monotonic() - 5.
+        worker = s.workers['motherboard']
+        original = worker.call
+        polls = 0
+        async def call(op, args=None, **kwargs):
+            nonlocal polls
+            if op == 'job.status':
+                polls += 1
+                return {'status':'completed' if polls == 2 else 'running'}
+            return await original(op,args,**kwargs)
+        worker.call = call
+        await game._monitor_step({'job_id':'step'}, 0., s.params.values)
+        assert time.monotonic() - game.last_seen < .5
+        seen = game.last_seen
+        game._record_ball(observation(seq=1))
+        assert game.last_seen == seen  # Repeated frame cannot refresh it.
+        game._record_ball(observation(seq=2) | {'age_ms':501})
+        assert game.last_seen == seen
+    asyncio.run(run())

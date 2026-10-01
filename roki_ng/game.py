@@ -38,6 +38,8 @@ class Goalkeeper:
         self.stop_requested = False
         self.hard_stop_requested = False
         self.motion_inflight = False
+        self.last_seen = 0.
+        self.last_seen_sequence = -1
         self.info = dict(running=False, state='stopped', observe_only=True,
                          reason='', decision='hold', ball=None, travel_m=0., job_id=None)
 
@@ -127,6 +129,16 @@ class Goalkeeper:
             raise Fault('imu_invalid', 'Body tilted or fallen; goalkeeper stopped')
         return quaternion_yaw(imu['quaternion_xyzw'])
 
+    def _record_ball(self, observation):
+        result = observation.get('result') or {}
+        age, seq = observation.get('age_ms'), result.get('frame_sequence')
+        if (observation.get('running') and not observation.get('error') and result.get('valid')
+                and type(seq) is int and seq > self.last_seen_sequence
+                and isinstance(age, (int, float)) and not isinstance(age, bool)
+                and math.isfinite(age) and 0 <= age <= 500):
+            self.last_seen_sequence = seq
+            self.last_seen = max(self.last_seen, time.monotonic() - age / 1000)
+
     async def _run(self, p, delay):
         ball_started = False
         observe = self.info['observe_only']
@@ -161,7 +173,8 @@ class Goalkeeper:
             self.info['state'] = 'observing' if observe else 'tracking'
             last_sequence = -1
             minimum_stamp = 0
-            last_seen = time.monotonic()
+            self.last_seen = time.monotonic()
+            self.last_seen_sequence = -1
             self.info['path_m'] = 0.
             while not self.stop_requested:
                 if self.s.mode != 'GAME':
@@ -173,6 +186,7 @@ class Goalkeeper:
                 if abs(wrap(yaw - heading)) > p['game.max_heading_error_rad']:
                     raise Fault('imu_invalid', 'Heading drift exceeded limit')
                 observation = await self._call('detection', 'ball.status')
+                self._record_ball(observation)
                 if observation.get('error'):
                     raise Fault('detection_fault', observation['error'])
                 action, reason = decision(observation, p['game.deadband_m'], p['game.ball_max_distance_m'])
@@ -184,12 +198,10 @@ class Goalkeeper:
                     fresh = False
                 if fresh:
                     last_sequence = seq
-                    if result.get('valid') and observation.get('age_ms', 1000) <= 500:
-                        last_seen = time.monotonic()
                 else:
                     action, reason = 'hold', 'waiting_for_new_frame'
                 self.info.update(ball=result or None, decision=action, reason=reason)
-                if not observe and time.monotonic() - last_seen > p['game.ball_loss_timeout_s']:
+                if not observe and time.monotonic() - self.last_seen > p['game.ball_loss_timeout_s']:
                     raise Fault('not_ready', 'Ball lost; explicit restart required')
                 if action != 'hold' and not observe:
                     # Bound total path as well as signed excursion; do not reset budget on reversal.
@@ -258,6 +270,7 @@ class Goalkeeper:
             if abs(wrap(await self._imu() - heading)) > p['game.max_heading_error_rad']:
                 raise Fault('imu_invalid', 'Heading drift during step')
             status = await self._call('detection', 'ball.status')
+            self._record_ball(status)
             result = status.get('result') or {}
             missing = (status.get('error') or not result.get('valid') or
                        status.get('age_ms') is None or status['age_ms'] > 500)
