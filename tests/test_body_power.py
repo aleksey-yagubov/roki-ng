@@ -144,6 +144,12 @@ def test_power_subscription_through_worker_and_udp(tmp_path):
             assert server.body_power_watch and server.body_imu_watch
             await second.close()
             second_closed = True
+            # session.close is acknowledged before asynchronous subscription cleanup.
+            async def session_removed():
+                while second.session in server.sessions:
+                    await asyncio.sleep(0.01)
+
+            await asyncio.wait_for(session_removed(), 3)
             assert not server.body_power_watch and server.body_imu_watch
             await client.request("data.unsubscribe", {"subscription_id": "body.imu"})
             assert not server.body_watch
