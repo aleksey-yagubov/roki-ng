@@ -260,7 +260,11 @@ class TestPlan:
             if self.body.stop_requested:
                 return
             initial = self.yaw()
-            yield from self.gait(10, right_leg=right, rotation=-0.23 if right else 0.23)
+            # This is deliberately -0.23 in both passes.  The gait engine
+            # reverses the physical turn when its first support leg changes;
+            # this matches the original rotation_test.  Reversing the value
+            # here as well makes both measured turns have the same yaw sign.
+            yield from self.gait(10, right_leg=right, rotation=-0.23)
             yield from self.pause(2)
             deltas.append(self.yaw() - initial)
         if not self.body.stop_requested:

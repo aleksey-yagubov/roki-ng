@@ -233,8 +233,11 @@ def test_rotation_plan_and_commit_barrier(tmp_path, monkeypatch):
         yield from original_jump(self, direction, *args, **kwargs)
         yaw[0] += -0.4 if direction == "turn_right" else 0.5
 
+    gait_calls = []
+
     def gait(self, cycles, **kwargs):
         assert cycles == 10
+        gait_calls.append(kwargs)
         yaw[0] += -2.3 if kwargs["right_leg"] else 2.1
         yield "drain",
 
@@ -264,6 +267,10 @@ def test_rotation_plan_and_commit_barrier(tmp_path, monkeypatch):
     assert baselines[0]["motion.rotation_yield_right"] == 0.23
     assert baselines[0]["motion.rotation_yield_left"] == 0.23
     assert baselines[-1]["motion.rotation_yield_left"] == 0.21
+    assert gait_calls == [
+        {"right_leg": True, "rotation": -0.23},
+        {"right_leg": False, "rotation": -0.23},
+    ]
     assert job["calibration"] == dict(zip(ROTATION_KEYS, [-0.4, 0.5, 0.23, 0.21]))
     with pytest.raises(Fault, match="saved"):
         body.command("test.start", {"name": "run_test"})
