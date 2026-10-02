@@ -1,6 +1,9 @@
 import cv2
 import numpy as np
 import pytest
+
+pytest.importorskip("scipy", reason="Offline calibration prototype requires SciPy")
+
 from tools.auto_field_calibration import segment,fit,correct,maps
 
 

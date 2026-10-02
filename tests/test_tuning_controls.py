@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 from roki_ng.supervisor import Supervisor
 from roki_ng.parameters import Parameters,SCHEMA
-from roki_ng.wire import Fault,pack
+from roki_ng.wire import Fault,pack,envelope
 
 
 def server(tmp_path,state=None):
@@ -65,8 +65,9 @@ def test_missing_auto_metadata_never_uses_defaults(tmp_path):
 
 def test_largest_colour_group_with_expected_values_fits_udp():
     values={k:v[1] for k,v in SCHEMA.items() if k.startswith('vision.yellow_posts.')}
-    pack({'v':1,'kind':'request','id':2**63,'session':2**63,'token':2**63,
-          'op':'params.set','body':{'values':values,'expected_values':values,'lease_epoch':2**63}})
+    pack(envelope('request', 'params.set',
+                  {'values': values, 'expected_values': values, 'lease_epoch': 2**63},
+                  id=2**63, session=2**63, token=2**63, sequence=2**63))
 
 
 def test_camera_rollback_restores_capture_override_not_persistent_default(tmp_path):

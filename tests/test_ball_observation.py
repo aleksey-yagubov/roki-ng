@@ -34,24 +34,60 @@ def scene(centres=((400, 400),), turf=True):
     return image
 
 
-def test_shape_turf_and_foot_projection():
+def test_field_support_and_unchanged_foot_projection():
     projector = Projector()
     candidates = ball_candidates(scene(), parameters(), projector, [0, 0, 0, 1])
     assert candidates == [dict(x_m=1., y_m=.1, rect=[380, 380, 421, 421])]
     assert projector.pixels == [(400., 420.)]
     assert not ball_candidates(scene(turf=False), parameters(), projector, [0, 0, 0, 1])
-    image = scene(())
-    cv2.rectangle(image, (300, 380), (450, 400), (0, 140, 255), -1)
-    assert not ball_candidates(image, parameters(), projector, [0, 0, 0, 1])
 
 
-def test_ambiguity_distance_and_size():
-    assert len(ball_candidates(scene(((300, 400), (500, 400))), parameters(), Projector(), [0, 0, 0, 1])) == 2
+def test_projection_limits_and_clipped_ball():
     for point in ((4., 0.), (-1., 0.), (float('nan'), 0.)):
         assert not ball_candidates(scene(), parameters(), Projector(point), [0, 0, 0, 1])
-    assert not ball_candidates(scene(((0, 400),)), parameters(), Projector(), [0, 0, 0, 1])
+    for centre in ((0, 400), (799, 400), (400, 0), (400, 649)):
+        assert ball_candidates(scene((centre,)), parameters(), Projector(), [0, 0, 0, 1])
     with pytest.raises(ValueError, match='800x650'):
         ball_candidates(np.zeros((50, 50, 3), np.uint8), parameters(), Projector(), [0, 0, 0, 1])
+
+
+def test_ball_on_white_line_with_highlight_and_incomplete_colour_mask():
+    image = scene(())
+    image[350:470, :] = 255  # No green in any of the ball's support regions.
+    cv2.circle(image, (400, 400), 20, (0, 140, 255), -1)
+    image[380:395, 380:421] = 255  # The bright cap is outside orange thresholds.
+    assert ball_candidates(image, parameters(), Projector(), [0, 0, 0, 1])
+    # Only a thin crescent remains: neither roundness nor bbox fill is meaningful.
+    cv2.circle(image, (400, 392), 23, (255, 255, 255), -1)
+    assert ball_candidates(image, parameters(), Projector(), [0, 0, 0, 1])
+
+
+@pytest.mark.parametrize('colour,origin', [
+    ((0, 130, 0), (370, 400)),  # Left only.
+    ((255, 255, 255), (425, 400)),  # Right only.
+    ((255, 255, 255), (395, 430)),  # Below only.
+])
+def test_field_support_requires_a_connected_patch_not_scattered_pixels(colour, origin):
+    image = scene(turf=False)
+    x, y = origin
+    image[y, x:x+6] = colour
+    assert not ball_candidates(image, parameters(), Projector(), [0, 0, 0, 1])
+    image[y+3, x] = colour
+    assert not ball_candidates(image, parameters(), Projector(), [0, 0, 0, 1])
+    image[y, x+6] = colour
+    assert ball_candidates(image, parameters(), Projector(), [0, 0, 0, 1])
+
+
+def test_thin_mask_uses_pixel_count_and_configurable_size_thresholds():
+    image = scene(())
+    cv2.line(image, (300, 400), (550, 400), (0, 140, 255), 1)
+    p = parameters()
+    assert ball_candidates(image, p, Projector(), [0, 0, 0, 1])
+    p['vision.orange_ball.pixels_min'] = 252
+    assert not ball_candidates(image, p, Projector(), [0, 0, 0, 1])
+    p['vision.orange_ball.pixels_min'] = 50
+    p['vision.orange_ball.box_area_min'] = 252
+    assert not ball_candidates(image, p, Projector(), [0, 0, 0, 1])
 
 
 def candidate(x=1.):
@@ -63,21 +99,33 @@ def test_temporal_freshness_and_rejection():
     assert tracker.state(0)[1]['reason'] == 'no_sync'
     for sequence in range(1, 4):
         result = tracker.update([candidate()], sequence, sequence*100, sequence*.1, sequence*.1)
-        assert result['valid'] == (sequence == 3)
+        assert result['valid']
     assert tracker.state(.81)[1]['reason'] == 'stale'
-    assert not tracker.update([candidate()], 4, 400, .9, .9)['valid']
+    assert tracker.update([candidate()], 4, 400, .9, .9)['valid']
     assert tracker.update([candidate()], 4, 400, 1., 1.)['reason'] == 'out_of_order'
     assert tracker.update([candidate()], 5, 399, 1., 1.)['reason'] == 'out_of_order'
     assert tracker.update([], 6, 600, 1.1, 1.1)['reason'] == 'no_ball'
-    assert tracker.update([candidate(), candidate()], 7, 700, 1.2, 1.2)['reason'] == 'ambiguous'
+    assert tracker.update([candidate(), candidate()], 7, 700, 1.2, 1.2)['valid']
     assert tracker.update([candidate()], 8, 800, 1.3, 1.9)['reason'] == 'stale'
 
 
-def test_jump_resets_temporal_gate():
+def test_nearest_ball_is_available_immediately_and_can_move_quickly():
+    class DistanceProjector:
+        def ground_point(self, pixel, quaternion):
+            return (800-pixel[0])/200, .1
+
+    image = scene(((300, 400), (500, 400), (700, 400)))
+    # A nearer orange distractor without field support must not win selection.
+    image[350:480, 630:780] = 0
+    cv2.circle(image, (700, 400), 20, (0, 140, 255), -1)
+    candidates = ball_candidates(image, parameters(), DistanceProjector(), [0, 0, 0, 1])
     tracker = BallTracker()
-    for sequence in range(1, 4):
-        tracker.update([candidate()], sequence, sequence, sequence*.1, sequence*.1)
-    assert not tracker.update([candidate(2.)], 4, 4, .4, .4)['valid']
+    first = tracker.update(candidates, 1, 1, .1, .1)
+    assert first['valid'] and first['rect'] == [480, 380, 521, 421]
+    for order in (candidates, list(reversed(candidates))):
+        assert BallTracker().update(order, 1, 1, .1, .1)['rect'] == first['rect']
+    moved = tracker.update([candidate(2.5)], 2, 2, .2, .2)
+    assert moved['valid'] and moved['x_m'] == 2.5
 
 
 def test_start_returns_before_calibration_and_close_invalidates(tmp_path, monkeypatch):
@@ -122,8 +170,7 @@ def test_exposure_age_includes_camera_queue_delay():
 def test_threshold_edits_reach_ball_and_invalidate_old_result(tmp_path):
     detector = Detection(dict(parameters=parameters(),state_dir=str(tmp_path)),lambda *a:None,lambda *a:None)
     old = detector.ball.parameters
-    for seq in range(1,4):
-        detector.ball.tracker.update([candidate()],seq,seq,seq*.1,seq*.1)
+    detector.ball.tracker.update([candidate()],1,1,.1,.1)
     assert detector.ball.tracker.result['valid']
     detector.command('params.apply',{'vision.orange_ball.pixels_min':80})
     assert detector.ball.parameters['vision.orange_ball.pixels_min']==80

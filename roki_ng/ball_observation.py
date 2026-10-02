@@ -1,4 +1,4 @@
-"""Conservative synchronized ball observations; no physical readiness guarantee.
+"""Colour ball observations with legacy field support and synchronized projection.
 
 The bottom of the orange silhouette approximates floor contact. A sphere's visible
 silhouette is not its contact point: range has a radius/perspective bias. This is
@@ -26,6 +26,27 @@ def capture_time(stamp, boot_ns, monotonic_now):
     return monotonic_now - (boot_ns-stamp)/1e9
 
 
+def field_near_ball(rect, green, white):
+    """Accept a green or white component beside/below the ball, as in the original."""
+    import cv2
+    x, y, w, h = rect
+    height, width = green.shape
+    regions = ((x+w, y, x+2*w, y+2*h),
+               (x-w, y, x, y+2*h),
+               (x, y+h-1, x+w, y+2*h))
+    for left, top, right, bottom in regions:
+        left, top = max(0, left), max(0, top)
+        right, bottom = min(width, right), min(height, bottom)
+        if left >= right or top >= bottom:
+            continue
+        for mask in (green, white):
+            _, _, stats, _ = cv2.connectedComponentsWithStats(
+                mask[top:bottom, left:right], connectivity=8, ltype=cv2.CV_32S)
+            if (stats[1:, cv2.CC_STAT_AREA] >= 7).any():
+                return True
+    return False
+
+
 def ball_candidates(image, parameters, projector, quaternion):
     import cv2
     import numpy as np
@@ -37,30 +58,28 @@ def ball_candidates(image, parameters, projector, quaternion):
              ('l_min', 'l_max', 'a_min', 'a_max', 'b_min', 'b_max')]
         return cv2.inRange(lab, (int(p[0]*2.55), p[2]+128, p[4]+128),
                            (math.ceil(p[1]*2.55), p[3]+128, p[5]+128))
-    orange, turf = mask('orange_ball'), mask('green_field')
-    contours, _ = cv2.findContours(orange, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    orange, turf, white = mask('orange_ball'), mask('green_field'), mask('white_marking')
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(
+        orange, connectivity=8, ltype=cv2.CV_32S)
+    candidates = [i for i in range(1, len(stats))
+                  if stats[i, cv2.CC_STAT_AREA] >= parameters['vision.orange_ball.pixels_min']
+                  and stats[i, cv2.CC_STAT_WIDTH]*stats[i, cv2.CC_STAT_HEIGHT]
+                  >= parameters['vision.orange_ball.box_area_min']]
+    candidates.sort(key=lambda i: stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT]/2,
+                    reverse=True)
     found = []
-    for contour in contours:
-        area = cv2.contourArea(contour)
-        perimeter = cv2.arcLength(contour, True)
-        x, y, w, h = cv2.boundingRect(contour)
-        # Reject clipped, extremely large, elongated and poorly filled regions.
-        if (area < parameters['vision.orange_ball.pixels_min'] or
-            w*h < parameters['vision.orange_ball.box_area_min'] or
-            min(w, h) < 5 or max(w, h) > 200 or not .65 <= w/h <= 1.5 or
-            x <= 0 or y <= 0 or x+w >= 800 or y+h >= 650 or
-            not perimeter or 4*math.pi*area/perimeter**2 < parameters.get('game.ball_min_circularity', .65) or
-            area/(w*h) < .5):
+    for i in candidates[:10]:
+        x, y, w, h, _ = map(int, stats[i])
+        if not field_near_ball((x, y, w, h), turf, white):
             continue
+        # Keep the existing silhouette-foot projection; do not change geometry
+        # together with candidate selection. Isolate this component from neighbours.
+        component = (labels[y:y+h, x:x+w] == i).astype(np.uint8)
+        contours, _ = cv2.findContours(component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contour = np.concatenate(contours) + (x, y)
         points = contour.reshape(-1, 2)
         bottom = points[:, 1].max()
         foot_x = float(np.mean(points[points[:, 1] >= bottom-1, 0]))
-        # A visible turf strip immediately beneath the foot is required.
-        half = max(3, w//3)
-        patch = turf[bottom+1:min(650, bottom+1+max(4, h//4)),
-                     max(0, int(foot_x)-half):min(800, int(foot_x)+half+1)]
-        if not patch.size or np.count_nonzero(patch)/patch.size < .5:
-            continue
         try:
             px, py = map(float, projector.ground_point((foot_x, float(bottom)), quaternion))
         except ValueError:
@@ -68,23 +87,17 @@ def ball_candidates(image, parameters, projector, quaternion):
         if not math.isfinite(px) or not math.isfinite(py) or px <= 0 or math.hypot(px, py) > parameters.get('game.ball_max_distance_m', 3.):
             continue
         found.append(dict(x_m=px, y_m=py, rect=[x, y, x+w, y+h]))
-        if len(found) >= 2:  # Enough to reject ambiguity, never choose the largest.
-            break
     return found
 
 
 class BallTracker:
-    """Pure temporal gate with explicit time for deterministic freshness tests."""
+    """Select the nearest candidate and reject stale or out-of-order observations."""
     def __init__(self):
         self.sequence = self.stamp = -1
-        self.previous = None
-        self.count = 0
         self.received = None
         self.result = invalid('no_sync')
 
     def invalidate(self, reason, sequence=None, stamp=None):
-        self.previous = None
-        self.count = 0
         self.result = invalid(reason, sequence, stamp)
         return self.result
 
@@ -94,16 +107,11 @@ class BallTracker:
         self.sequence, self.stamp = sequence, stamp
         if now-received > FRESH_SECONDS or received > now:
             return self.invalidate('stale', sequence, stamp)
-        if self.received is not None and received-self.received > FRESH_SECONDS:
-            self.invalidate('stale')
         self.received = received
-        if len(candidates) != 1:
-            return self.invalidate('no_ball' if not candidates else 'ambiguous', sequence, stamp)
-        candidate = candidates[0]
-        stable = self.previous and math.hypot(candidate['x_m']-self.previous['x_m'], candidate['y_m']-self.previous['y_m']) <= .15
-        self.count = self.count+1 if stable else 1
-        self.previous = candidate
-        self.result = dict(valid=self.count >= 3, reason='ok' if self.count >= 3 else 'unstable',
+        if not candidates:
+            return self.invalidate('no_ball', sequence, stamp)
+        candidate = min(candidates, key=lambda c: math.hypot(c['x_m'], c['y_m']))
+        self.result = dict(valid=True, reason='ok',
                            frame_sequence=sequence, sensor_timestamp_ns=stamp, **candidate)
         return self.result
 

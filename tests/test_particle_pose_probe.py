@@ -2,6 +2,8 @@ import numpy as np
 import pytest
 import cv2
 
+pytest.importorskip("scipy", reason="Offline localisation prototype requires SciPy")
+
 from tools.particle_pose_probe import field_model, update, detect_circle
 
 

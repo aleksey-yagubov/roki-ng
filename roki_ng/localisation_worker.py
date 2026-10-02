@@ -44,10 +44,21 @@ class Localisation:
                 'error':self.error,'result':result,
                 'configuration_id':self.configuration_id,'geometry':self.geometry}
 
+    def video_source(self):
+        from .dataplane import LOCALISATION_TOPIC
+        from .video_sources import frame_source
+        state = self.state()
+        available = state['running'] and not state['error'] and not self.video_error
+        return frame_source('Разметка локализации', LOCALISATION_TOPIC, 800, 650,
+                            available=bool(available),
+                            reason=None if available else 'localisation_not_ready',
+                            publishing=self.video_requested.is_set() and not self.video_error
+                                and time.monotonic() - self.video_last_frame < 2,
+                            requested=self.video_requested.is_set(), on_demand=True,
+                            dependencies=('camera',))
+
     def command(self, op, args):
         if op in ('source.start', 'source.stop', 'source.status'):
-            if args.get('source') != 'localisation':
-                raise Fault('not_found', 'Unknown video source')
             if op == 'source.start':
                 if args.get('parameters', {}) != {}:
                     raise Fault('invalid_argument', 'No source parameters supported')
