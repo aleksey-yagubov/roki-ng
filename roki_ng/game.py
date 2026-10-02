@@ -1,287 +1,195 @@
-"""Bounded FIRA penalty goalkeeper. The supervisor remains the motion arbiter."""
-import asyncio
-import math
-import time
-import uuid
-
+"""Autonomous football roles; only completed body jobs update odometry."""
+import asyncio, math, time, uuid
 from .calibration import quaternion_yaw, wrap
-from .wire import Fault, boolean, choice, number
-
+from .wire import Fault, choice, number
 
 def decision(observation, deadband, max_distance):
-    """Robot-relative lateral correction; never act on untrusted observations."""
-    result = observation.get('result') or {}
-    age = observation.get('age_ms')
-    if (not observation.get('running') or observation.get('error') or
-            not result.get('valid') or not isinstance(age, (int, float)) or
-            not math.isfinite(age) or not 0 <= age <= 500):
-        return 'hold', result.get('reason') or 'no_fresh_ball'
-    x, y = result.get('x_m'), result.get('y_m')
-    if (any(isinstance(v, bool) or not isinstance(v, (int, float)) or
-            not math.isfinite(v) for v in (x, y)) or
-            x <= 0 or math.hypot(x, y) > max_distance):
-        return 'hold', 'invalid_ball_geometry'
-    if abs(y) <= deadband:
-        return 'hold', 'ball_centered'
-    return ('left' if y > 0 else 'right'), 'lateral_correction'
-
+    result=observation.get('result') or {}; age=observation.get('age_ms')
+    if (not observation.get('running') or observation.get('error') or not result.get('valid') or not isinstance(age,(int,float)) or not math.isfinite(age) or not 0<=age<=500): return 'hold',result.get('reason') or 'no_fresh_ball'
+    x,y=result.get('x_m'),result.get('y_m')
+    if any(type(v) not in (int,float) or not math.isfinite(v) for v in (x,y)) or x<=0 or math.hypot(x,y)>max_distance: return 'hold','invalid_ball_geometry'
+    return ('left' if y>deadband else 'right' if y < -deadband else 'hold','lateral_correction' if abs(y)>deadband else 'ball_centered')
 
 class Goalkeeper:
+    """The name is retained internally; it runs FIRA goalkeeper and forward."""
     def __init__(self, supervisor):
-        self.s = supervisor
-        self.task = None
-        self.session = None
-        self.stop_lock = asyncio.Lock()
-        self.generation = 0
-        self.cleaning = False
-        self.starting = False
-        self.stop_requested = False
-        self.hard_stop_requested = False
-        self.motion_inflight = False
-        self.last_seen = 0.
-        self.last_seen_sequence = -1
-        self.info = dict(running=False, state='stopped', observe_only=True,
-                         reason='', decision='hold', ball=None, travel_m=0., job_id=None)
+        self.s=supervisor; self.task=None; self.session=None; self.stop_lock=asyncio.Lock(); self.generation=0; self.starting=False; self.cleaning=False
+        self.stop_requested=self.hard_stop_requested=self.motion_inflight=self.paused=self.pickup_requested=False; self.last_seen=0.; self.last_seen_sequence=-1; self.info=self._info()
+    def _info(self): return dict(running=False,state='stopped',role=None,entry=None,phase='idle',recovery='none',pickup_ready=False,reason='',decision='hold',ball=None,position=None,last_correction=None,travel_m=0.,path_m=0.,job_id=None)
+    def state(self): return dict(self.info)
+    async def _call(self,role,op,args=None,**kwargs): return await self.s.workers[role].call(op,args or {},**kwargs)
 
-    def state(self):
-        return dict(self.info)
-
-    async def start(self, session, args):
-        if self.info['running'] or (self.task and not self.task.done()):
-            raise Fault('busy', 'Goalkeeper already running or stopping')
-        if set(args) - {'strategy', 'observe_only', 'delay_seconds', 'lease_epoch'}:
-            raise Fault('invalid_argument', 'Unknown game settings')
-        choice(args, 'strategy', None, ('FIRA_penalty_Goalkeeper',))
-        observe = boolean(args, 'observe_only', True)
-        delay = number(args, 'delay_seconds', 0, 0, 30, True)
-        if self.s.mode != 'MANUAL':
-            raise Fault('invalid_state', 'Select MANUAL before starting game')
-        self.s.require_motion_ready()
-        params = dict(self.s.params.values)
-        if not observe and not params['game.geometry_verified']:
-            raise Fault('not_ready', 'Verify camera/body geometry in goalkeeper crouch first')
-        generation = self.generation
-        self.starting = True
-        try:
-            body = await self.s.workers['motherboard'].call('state')
-        finally:
-            self.starting = False
-        self.s.require_control(session, args)
-        if self.info['running'] or self.s.mode != 'MANUAL' or generation != self.generation:
-            raise Fault('busy', 'Game state changed during start')
-        if body.get('active_job') or not body.get('body_connected') or body.get('error'):
-            raise Fault('not_ready', 'Body must be connected and idle without errors')
-        if observe and body.get('head', {}).get('pan') != 0:
-            raise Fault('not_ready', 'Center head pan before observation-only goalkeeper')
-        self.session = session
-        self.cleaning = False
-        self.stop_requested = self.hard_stop_requested = self.motion_inflight = False
-        self.info = dict(running=True, state='preparing', observe_only=observe,
-                         reason='', decision='hold', ball=None, travel_m=0.,
-                         job_id=uuid.uuid4().hex)
-        self.s.mode = 'GAME'
-        self.task = asyncio.create_task(self._run(params, delay))
-        return self.state()
-
-    async def stop(self, reason='operator_stop', *, hard=False):
-        # Escalation must not wait behind another caller awaiting graceful stop.
-        self.stop_requested = True
-        self.hard_stop_requested |= hard
-        if hard and self.task and not self.task.done() and not self.cleaning:
-            self.task.cancel()
+    async def start(self,session,args):
+        if self.info['running'] or self.starting or self.task and not self.task.done(): raise Fault('busy','Game already running or stopping')
+        if set(args)-{'strategy','entry','delay_seconds','observe_only','lease_epoch'}: raise Fault('invalid_argument','Unknown game settings')
+        role=choice(args,'strategy',None,('FIRA_penalty_Goalkeeper','forward'))
+        entry=choice(args,'entry','center',('center','left','right')) if role=='forward' else 'goalkeeper'
+        if role!='forward' and 'entry' in args: raise Fault('invalid_argument','Goalkeeper has no entry')
+        delay=number(args,'delay_seconds',0,0,30,True)
+        if self.s.mode!='MANUAL': raise Fault('invalid_state','Select MANUAL before starting game')
+        self.s.require_motion_ready(); self.starting=True; generation=self.generation
+        try: body=await self._call('motherboard','state')
+        finally: self.starting=False
+        self.s.require_control(session,args)
+        if generation!=self.generation or self.s.mode!='MANUAL': raise Fault('cancelled','Game start cancelled')
+        if body.get('active_job') or not body.get('body_connected') or body.get('error'): raise Fault('not_ready','Body must be connected, idle and healthy')
+        self.session=session; self.stop_requested=self.hard_stop_requested=self.paused=self.pickup_requested=False
+        self.info=self._info()|dict(running=True,state='preparing',role=role,entry=entry,phase='initialising',job_id=uuid.uuid4().hex); self.s.mode='GAME'
+        self.task=asyncio.create_task(self._run(dict(self.s.params.values),role,entry,delay)); return self.state()
+    async def stop(self,reason='operator_stop',*,hard=False):
+        self.stop_requested=True; self.hard_stop_requested|=hard
         async with self.stop_lock:
-            self.generation += 1
-            task = self.task
-            if task and not task.done():
-                self.info.update(state='stopping', reason=reason, decision='hold')
-                if not self.cleaning and (self.hard_stop_requested or not self.motion_inflight):
-                    task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-            if self.info['state'] != 'failed':
-                self.info.update(running=False, state='stopped', reason=reason, decision='hold')
-            if self.s.mode == 'GAME':
-                self.s.mode = 'MANUAL' if self.s.owner else 'IDLE'
+            self.generation+=1
+            if self.task and not self.task.done():
+                self.info.update(state='stopping',phase='stopping',reason=reason)
+                # There is no supported partial result before a body job starts.
+                # Cancelling a delay/preparation therefore cannot replay motion.
+                if hard or not self.motion_inflight:self.task.cancel()
+                await asyncio.gather(self.task,return_exceptions=True)
+            self.info.update(running=False,state='stopped',phase='stopped',decision='hold',reason=reason)
+            if self.s.mode=='GAME':self.s.mode='MANUAL' if self.s.owner else 'IDLE'
             return self.state()
-
-    async def _call(self, role, op, args=None, **kwargs):
-        return await self.s.workers[role].call(op, args or {}, **kwargs)
-
-    async def _job(self, response, timeout=15):
-        until = time.monotonic() + timeout
-        while time.monotonic() < until:
-            job = await self._call('motherboard', 'job.status', {'job_id': response['job_id']})
-            if job['status'] == 'completed':
-                self.motion_inflight = False
-                return
-            if job['status'] in ('failed', 'cancelled'):
-                raise Fault('motion_fault', job.get('reason') or 'Game motion interrupted')
+    async def pause(self):
+        if not self.info['running']:raise Fault('invalid_state','No active game')
+        self.paused=True; self.info.update(state='paused',phase='paused',decision='hold')
+        if self.motion_inflight:await self._call('motherboard','motion.stop_graceful',urgent=True)
+        return self.state()
+    async def resume(self):
+        if not self.info['running'] or self.pickup_requested:raise Fault('invalid_state','Game cannot resume')
+        self.paused=False;self.info.update(state='searching',phase='searching');return self.state()
+    async def pickup(self):
+        if not self.info['running']:raise Fault('invalid_state','No active game')
+        self.pickup_requested=self.paused=True;self.info.update(state='pickup',phase='pickup',decision='hold',recovery='cancelled')
+        if getattr(self.s,'voice',None):self.s.voice.say('Pick up')
+        if self.motion_inflight:await self._call('motherboard','motion.stop_graceful',urgent=True)
+        return self.state()
+    async def _imu(self,fallen_ok=False):
+        imu=(await self._call('motherboard','body.telemetry.read')).get('body.imu',{}); stamp=imu.get('source_mono_ns'); age=(time.monotonic_ns()-stamp)/1e9 if isinstance(stamp,int) else math.inf
+        if not imu.get('valid') or not 0<=age<.25:raise Fault('imu_invalid','Fresh body IMU required')
+        fallen=abs(imu.get('pitch_deg',90))>25 or abs(imu.get('roll_deg',90))>25
+        if fallen and not fallen_ok:raise Fault('fallen','Body is not upright')
+        return quaternion_yaw(imu['quaternion_xyzw']),fallen
+    def _entry_pose(self,p,entry,yaw):
+        g=p['field.geometry']; l,w=g['length'],g['width']
+        if entry=='left':return [-l/2,-w/2,wrap(yaw+math.pi/2)]
+        if entry=='right':return [-l/2,w/2,wrap(yaw-math.pi/2)]
+        return [-l/2+.18,0.,yaw]
+    async def _wait_job(self,response,timeout=20):
+        self.motion_inflight=True; end=time.monotonic()+timeout
+        while time.monotonic()<end:
+            job=await self._call('motherboard','job.status',{'job_id':response['job_id']})
+            if job['status']=='completed':self.motion_inflight=False;return True
+            if job['status'] in ('failed','cancelled'):self.motion_inflight=False;return False
+            if self.stop_requested or self.pickup_requested:await self._call('motherboard','motion.stop_graceful',urgent=True)
             await asyncio.sleep(.05)
-        raise Fault('timeout', 'Game motion did not complete')
+        self.motion_inflight=False;return False
+    async def _move(self,op,args,delta,pose):
+        response=await self._call('motherboard',op,args)
+        if await self._wait_job(response):
+            c,s=math.cos(pose[2]),math.sin(pose[2]); dx,dy=delta;pose[0]+=c*dx-s*dy;pose[1]+=s*dx+c*dy
+            self.info['position']=dict(x_m=pose[0],y_m=pose[1],yaw_rad=pose[2]);return True
+        return False
+    async def _recover(self):
+        self.info.update(state='recovering',phase='get_up',recovery='checking')
+        while not self.stop_requested and not self.pickup_requested:
+            try:
+                _,fallen=await self._imu(True)
+                if not fallen:return True
+                self.info['recovery']='getting_up'
+                await self._wait_job(await self._call('motherboard','motion.get_up',{'crouch':'off'}),30)
+            except Fault as exc:self.info.update(recovery='waiting_measurement',reason=str(exc)[:180])
+            await asyncio.sleep(.25)
+        return False
+    async def _ball(self):
+        obs=await self._call('detection','ball.status');result=obs.get('result') or {};seq=result.get('frame_sequence',-1)
+        if result.get('valid') and type(seq) is int and seq>self.last_seen_sequence:self.last_seen_sequence=seq
+        self.info['ball']=result or None;return obs
 
-    async def _imu(self):
-        data = await self._call('motherboard', 'body.telemetry.read')
-        imu = data.get('body.imu', {})
-        stamp = imu.get('source_mono_ns')
-        age = (time.monotonic_ns() - stamp) / 1e9 if isinstance(stamp, int) else float('inf')
-        if not imu.get('valid') or not 0 <= age < .25:
-            raise Fault('imu_invalid', 'Fresh body IMU required')
-        if abs(imu.get('pitch_deg', 90)) > 25 or abs(imu.get('roll_deg', 90)) > 25:
-            raise Fault('imu_invalid', 'Body tilted or fallen; goalkeeper stopped')
-        return quaternion_yaw(imu['quaternion_xyzw'])
+    def _record_ball(self, obs):
+        """Keep a monotonic freshness clock; repeated frames never refresh it."""
+        r=obs.get('result') or {}; seq=r.get('frame_sequence'); age=obs.get('age_ms')
+        if (obs.get('running') and not obs.get('error') and r.get('valid') and type(seq) is int
+                and seq>self.last_seen_sequence and isinstance(age,(int,float)) and 0<=age<=500):
+            self.last_seen_sequence=seq; self.last_seen=time.monotonic()-age/1000
 
-    def _record_ball(self, observation):
-        result = observation.get('result') or {}
-        age, seq = observation.get('age_ms'), result.get('frame_sequence')
-        if (observation.get('running') and not observation.get('error') and result.get('valid')
-                and type(seq) is int and seq > self.last_seen_sequence
-                and isinstance(age, (int, float)) and not isinstance(age, bool)
-                and math.isfinite(age) and 0 <= age <= 500):
-            self.last_seen_sequence = seq
-            self.last_seen = max(self.last_seen, time.monotonic() - age / 1000)
-
-    async def _run(self, p, delay):
-        ball_started = False
-        observe = self.info['observe_only']
-        failed = False
-        try:
-            if delay:
-                self.info['state'] = 'waiting'
-                await asyncio.sleep(delay)
-            heading = await self._imu()
-            # Observation mode never changes head or body pose.
-            if not observe:
-                self.motion_inflight = True
-                await self._job(await self._call('motherboard', 'motion.pose', {'name': 'crouch'}))
-                if self.stop_requested:
-                    return
-                await self._call('motherboard', 'motion.head', {'pan': 0, 'tilt': p['game.head_tilt']})
-                await asyncio.sleep(.5)
-            await self.s.dispatch(None, 'camera.start', {}, _from_game=True)
-            until = time.monotonic() + 15
-            while True:
-                camera = await self._call('camera', 'camera.status')
-                if camera.get('error') or not camera.get('running'):
-                    raise Fault('camera_fault', camera.get('error') or 'Camera stopped')
-                if camera.get('imu_sync', {}).get('state') == 'synced':
-                    break
-                if time.monotonic() > until:
-                    raise Fault('timeout', 'Camera/IMU alignment timed out')
-                await asyncio.sleep(.1)
-            async with self.s.parameter_lock:
-                # Threshold edits made during preparation must not be overwritten
-                # by the fixed motion/geometry snapshot from game.start.
-                current = p | {k:v for k,v in self.s.params.values.items() if k.startswith('vision.')}
-                ball_started = True  # Stop even if command reply is lost.
-                await self._call('detection', 'ball.start', {'parameters': current,
-                    'unicam_minus_stm': camera['imu_sync']['unicam_minus_stm']}, timeout=5)
-            self.info['state'] = 'observing' if observe else 'tracking'
-            last_sequence = -1
-            minimum_stamp = 0
-            self.last_seen = time.monotonic()
-            self.last_seen_sequence = -1
-            self.info['path_m'] = 0.
-            while not self.stop_requested:
-                if self.s.mode != 'GAME':
-                    raise Fault('invalid_state', 'Game mode revoked')
-                body = await self._call('motherboard', 'state')
-                if not body.get('body_connected') or body.get('error'):
-                    raise Fault('body_unavailable', 'Body connection lost')
-                yaw = await self._imu()
-                if abs(wrap(yaw - heading)) > p['game.max_heading_error_rad']:
-                    raise Fault('imu_invalid', 'Heading drift exceeded limit')
-                observation = await self._call('detection', 'ball.status')
-                self._record_ball(observation)
-                if observation.get('error'):
-                    raise Fault('detection_fault', observation['error'])
-                action, reason = decision(observation, p['game.deadband_m'], p['game.ball_max_distance_m'])
-                result = observation.get('result') or {}
-                seq = result.get('frame_sequence', -1)
-                fresh = isinstance(seq, int) and seq > last_sequence
-                if (not isinstance(result.get('sensor_timestamp_ns'), int) or
-                        result['sensor_timestamp_ns'] <= minimum_stamp):
-                    fresh = False
-                if fresh:
-                    last_sequence = seq
-                else:
-                    action, reason = 'hold', 'waiting_for_new_frame'
-                self.info.update(ball=result or None, decision=action, reason=reason)
-                if not observe and time.monotonic() - self.last_seen > p['game.ball_loss_timeout_s']:
-                    raise Fault('not_ready', 'Ball lost; explicit restart required')
-                if action != 'hold' and not observe:
-                    # Bound total path as well as signed excursion; do not reset budget on reversal.
-                    reserve = p['game.step_budget_m']
-                    if self.info['path_m'] + reserve > p['game.max_path_m']:
-                        raise Fault('not_ready', 'Movement budget reached; verify position and restart')
-                    sign = 1 if action == 'left' else -1
-                    if abs(self.info['travel_m'] + sign * reserve) > p['game.max_excursion_m']:
-                        raise Fault('not_ready', 'Goalkeeper excursion limit reached')
-                    self.info['path_m'] += reserve
-                    self.info['travel_m'] += sign * reserve
-                    self.info['state'] = 'stepping'
-                    self.motion_inflight = True
-                    response = await self._call('motherboard', 'game.step', {
-                        'direction': action, 'heading': heading,
-                        'side_mm': p['game.side_step_mm'], 'cycles': p['game.step_cycles']})
-                    await self._monitor_step(response, heading, p)
-                    # Wait for an observation acquired after motion completion.
-                    minimum_stamp = time.clock_gettime_ns(getattr(time, 'CLOCK_BOOTTIME', time.CLOCK_MONOTONIC))
-                    self.info['state'] = 'tracking'
-                await asyncio.sleep(.1)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            failed = True
-            self.info.update(state='failed', reason=str(exc)[:180], decision='hold')
-            self.s.log('game', 'ERROR', str(exc))
-        finally:
-            self.cleaning = True
-            # A failed/unknown active motion requires the urgent barrier. A normal
-            # exit after the terminal gait cycle must preserve its supported pose.
-            if not observe and (self.motion_inflight or self.hard_stop_requested):
-                self.s.motion_ready = False
-                try:
-                    await self._call('motherboard', 'motion.stop_hard', urgent=True)
-                    self.s.motion_ready = True
-                except Exception as exc:
-                    self.s.motion_ready = False
-                    failed = True
-                    self.info.update(state='failed', reason=f'Stop unconfirmed: {exc}'[:180])
-            if ball_started:
-                try:
-                    await self._call('detection', 'ball.stop', timeout=5)
-                except Exception as exc:
-                    self.s.log('game', 'ERROR', f'Ball cleanup: {exc}')
-            # Keep shared camera running for operator video/calibration.
-            self.info.update(running=False, decision='hold')
-            self.cleaning = False
-            if not failed:
-                self.info['state'] = 'stopped'
-            if self.s.mode == 'GAME':
-                self.s.mode = 'MANUAL' if self.s.owner else 'IDLE'
-            if self.s.head_menu and self.session is self.s.local_session:
-                self.s.spawn(self.s.head_menu.game_finished(self.state()))
-
-    async def _monitor_step(self, response, heading, p):
-        until = time.monotonic() + 12
-        finishing = False
-        while time.monotonic() < until:
-            job = await self._call('motherboard', 'job.status', {'job_id': response['job_id']})
-            if job['status'] == 'completed':
-                self.motion_inflight = False
-                return
-            if job['status'] in ('failed', 'cancelled'):
-                raise Fault('motion_fault', job.get('reason') or 'Game step interrupted')
-            if abs(wrap(await self._imu() - heading)) > p['game.max_heading_error_rad']:
-                raise Fault('imu_invalid', 'Heading drift during step')
-            status = await self._call('detection', 'ball.status')
-            self._record_ball(status)
-            result = status.get('result') or {}
-            missing = (status.get('error') or not result.get('valid') or
-                       status.get('age_ms') is None or status['age_ms'] > 500)
-            if (self.stop_requested or missing) and not finishing:
-                await self._call('motherboard', 'motion.stop_graceful', urgent=True)
-                finishing = True
-                self.info.update(state='finishing_step', decision='hold',
-                                 reason='operator_stop' if self.stop_requested else 'ball_observation_lost')
+    async def _monitor_step(self,response,heading,p):
+        """Compatibility helper and graceful barrier used by finite side steps."""
+        self.motion_inflight=True; finishing=False; end=time.monotonic()+12
+        while time.monotonic()<end:
+            job=await self._call('motherboard','job.status',{'job_id':response['job_id']})
+            if job['status']=='completed':self.motion_inflight=False;return
+            if job['status'] in ('failed','cancelled'):self.motion_inflight=False;raise Fault('motion_fault',job.get('reason') or 'Game step interrupted')
+            obs=await self._call('detection','ball.status');self._record_ball(obs)
+            if (self.stop_requested or obs.get('error')) and not finishing:
+                await self._call('motherboard','motion.stop_graceful',urgent=True);finishing=True
             await asyncio.sleep(.1)
-        raise Fault('timeout', 'Goalkeeper step timed out')
+        self.motion_inflight=False;raise Fault('timeout','Game step timed out')
+    async def _run(self,p,role,entry,delay):
+        started=False; approach_jumps=0; approach_sequence=-1
+        try:
+            if delay:self.info.update(state='waiting',phase='start_later');await asyncio.sleep(delay)
+            yaw,_=await self._imu(True);pose=self._entry_pose(p,entry,yaw);self.info['position']=dict(x_m=pose[0],y_m=pose[1],yaw_rad=pose[2])
+            await self._move('motion.pose',{'name':'crouch'},(0,0),pose);await self._call('motherboard','motion.head',{'pan':0,'tilt':p['game.head_tilt']})
+            await self.s.dispatch(None,'camera.start',{},_from_game=True);camera=await self._call('camera','camera.status')
+            if not camera.get('running') or camera.get('error'):raise Fault('camera_fault',camera.get('error') or 'Camera stopped')
+            # Threshold changes made while posture/capture was being prepared
+            # belong to this game; fixed geometry/motion parameters do not.
+            p = p | {k:v for k,v in self.s.params.values.items() if k.startswith('vision.')}
+            await self._call('detection','ball.start',{'parameters':p,'unicam_minus_stm':camera.get('imu_sync',{}).get('unicam_minus_stm',0)});started=True
+            if role=='forward' and entry=='center' and not delay and p.get('game.forward.kick_off_ride',True):
+                self.info.update(state='kickoff_ride',phase='kickoff_ride');await self._move('motion.jump',{'direction':'forward','fraction':1.,'crouch':'on'},(.03,0),pose)
+            while not self.stop_requested:
+                if self.pickup_requested:
+                    # Pick-up never attempts another get-up.  A standing body is
+                    # put into its transfer posture; a fallen one waits for a
+                    # person to place it upright and re-enter a role explicitly.
+                    try:
+                        _, fallen = await self._imu(True)
+                    except Fault:
+                        fallen = True
+                    if fallen:
+                        self.info.update(pickup_ready=False,state='pickup_waiting',phase='pickup_waiting')
+                    else:
+                        await self._move('motion.pose', {'name':'base_stand'}, (0,0), pose)
+                        self.info.update(pickup_ready=True,state='pickup_ready',phase='pickup_ready')
+                    while self.pickup_requested and not self.stop_requested:await asyncio.sleep(.1)
+                if self.paused:await asyncio.sleep(.1);continue
+                try:
+                    _,fallen=await self._imu(True)
+                    if fallen:
+                        if not await self._recover():break
+                        self.last_seen_sequence=-1;continue
+                    obs=await self._ball()
+                except Fault as exc:self.info.update(state='reconnecting',phase='reconnecting',recovery='link',reason=str(exc)[:180]);await asyncio.sleep(.25);continue
+                if role=='FIRA_penalty_Goalkeeper':
+                    action,reason=decision(obs,p['game.deadband_m'],p['game.ball_max_distance_m']);self.info.update(state='tracking',phase='goalkeeper',decision=action,reason=reason)
+                    if action!='hold':
+                        side=p['game.side_step_mm']/1000;limit=p['field.goal.0']['width']/2;sign=1 if action=='left' else -1;target=max(-limit,min(limit,pose[1]+sign*side))
+                        if await self._move('game.step',{'direction':action,'heading':pose[2],'side_mm':p['game.side_step_mm'],'cycles':p['game.step_cycles']},(0,target-pose[1]),pose):self.info['last_correction']='odometry'
+                else:
+                    self.info.update(state='searching',phase='forward_search',decision='hold');r=obs.get('result') or {}
+                    if r.get('valid') and r.get('x_m',99)<.38 and abs(r.get('y_m',99))<.12:
+                        # A kick is permitted only from the currently observed
+                        # support pose, never from the estimate before a jump.
+                        self.info.update(state='kicking',phase='kick');await self._move('motion.kick',{'leg':'right' if r['y_m']<=0 else 'left','power':80,'offset':0},(0,0),pose);approach_jumps=0
+                    elif r.get('valid'):
+                        sequence=r.get('frame_sequence')
+                        if approach_jumps >= 5:
+                            self.info.update(state='reobserving',phase='forward_reobserve')
+                            if sequence == approach_sequence: await asyncio.sleep(.08);continue
+                            approach_jumps=0
+                        if await self._move('motion.jump',{'direction':'forward','fraction':1.,'crouch':'on'},(.03,0),pose):
+                            approach_jumps+=1;approach_sequence=sequence
+                await asyncio.sleep(.08)
+        except asyncio.CancelledError:raise
+        except Exception as exc:self.info.update(state='failed',phase='failed',reason=str(exc)[:180]);self.s.log('game','ERROR',str(exc))
+        finally:
+            if self.motion_inflight or self.hard_stop_requested:
+                try:await self._call('motherboard','motion.stop_hard',urgent=True)
+                except Exception as exc:self.s.log('game','ERROR',f'Stop unconfirmed: {exc}')
+            if started:
+                try:await self._call('detection','ball.stop',timeout=5)
+                except Exception as exc:self.s.log('game','ERROR',f'Ball cleanup: {exc}')
+            self.info['running']=False
+            if self.info['state'] not in ('failed','pickup_ready'):self.info.update(state='stopped',phase='stopped')
+            if self.s.mode=='GAME':self.s.mode='MANUAL' if self.s.owner else 'IDLE'

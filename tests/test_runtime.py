@@ -7,9 +7,10 @@ import pytest
 from roki_ng.body import Body
 from roki_ng.client import Client
 from roki_ng.parameters import Parameters
-from roki_ng.stream import Streams, pipeline_description, video_spec
-from roki_ng.supervisor import Supervisor
-from roki_ng.wire import Fault, envelope, pack
+from roki_ng.stream import Streams, pipeline_description
+from roki_ng.video_sources import capture_source, settings_for
+from roki_ng.supervisor import Supervisor, Session
+from roki_ng.wire import Fault, UDP_LIMIT, udp_socket, unpack
 
 
 def test_parameters_persist_and_reject_invalid(tmp_path):
@@ -80,24 +81,24 @@ def test_video_lifecycle_does_not_open_on_query():
     events = []
     video = Streams({"simulate": True}, lambda *a: events.append(a), lambda *a: None)
     video.command("videostream.capabilities", {})
-    info = video.command("videostream.create", {})
+    source = capture_source() | {"name": "stream"}
+    video.command("sources.configure", {"items": [source]})
     assert not video.state()["active_streams"]
     assert all(p.Gst is None for p in video.pipelines.values())
-    text = pipeline_description(info["spec"])
+    text = pipeline_description(source, source["settings"])
     assert "width=1600,height=1300,depth=10" in text
     assert "width=800,height=650,framerate=60/1" in text
     assert "libcamerasrc" in text and "v4l2h264enc" in text
-    destination = {'session_id':1, 'host':'127.0.0.1', 'rtp_port':5004}
-    video.command("videostream.start", {"stream_id": info["stream_id"], **destination})
-    other = video.command("videostream.create", {})
-    with pytest.raises(Fault, match="owns"):
-        video.command("videostream.start", {"stream_id": other["stream_id"], **destination})
-    video.command("videostream.stop", {"stream_id": info["stream_id"]})
-    video.command("videostream.start", {"stream_id": other["stream_id"], **destination})
+    destination = {'name':'stream', 'session_id':1, 'host':'127.0.0.1', 'rtp_port':5004}
+    first = video.command("videostream.subscribe", destination)
+    second = video.command("videostream.subscribe", destination)
+    assert first["run_id"] == second["run_id"] and second["receivers"] == 1
+    video.command("videostream.stop", {"name": "stream"})
+    video.command("videostream.subscribe", destination)
     video.close()
     assert not video.state()["active_streams"]
     with pytest.raises(Fault):
-        video_spec({"output": {"width": 801}})
+        settings_for(source, {"width": 801})
 
 
 def test_udp_processes(tmp_path):
@@ -131,20 +132,9 @@ def test_udp_processes(tmp_path):
             await asyncio.sleep(0.7)
             state = await client.request("data.snapshot", {"topic": "motion.state"})
             assert state["data"]["pose"] == "crouch"
-            stream = await client.request("videostream.create")
-            assert stream["state"] == "created"
-            await client.request("videostream.start", {"stream_id": stream["stream_id"], 'rtp_port':5004})
+            await client.request("videostream.subscribe", {"name": "stream", "rtp_port": 5004})
             await asyncio.sleep(0.15)
-            assert (await client.request("videostream.status", {"stream_id": stream["stream_id"]}))["state"] == "running"
-            # Retransmit the same create datagram: only one resource is allocated.
-            await client._exchange("request", "videostream.create", {"lease_epoch": client.lease_epoch})
-            duplicate_id = client.id
-            raw = pack(envelope("request", "videostream.create", {"lease_epoch": client.lease_epoch},
-                                session=client.session, token=client.token, id=duplicate_id))
-            count = (await client.request('videostream.list'))['total']
-            await asyncio.get_running_loop().sock_sendto(client.sock, raw, client.address)
-            await asyncio.sleep(0.1)
-            assert (await client.request('videostream.list'))['total'] == count
+            assert (await client.request("videostream.status", {"name": "stream"}))["state"] == "running"
             # A malformed datagram cannot stop the service.
             await asyncio.get_running_loop().sock_sendto(client.sock, b"\xc1", client.address)
             assert (await client.request("system.status"))["state"] == "MANUAL"
@@ -180,7 +170,7 @@ def test_worker_fault_keeps_control_endpoint_alive(tmp_path):
             assert server.workers["stream"].process.pid != old_pid
             assert (await client.request("system.status"))["state"] == "IDLE"
             await client.request("mode.set", {"mode": "MANUAL"})
-            assert (await client.request("videostream.create"))["state"] == "created"
+            assert (await client.request("videostream.list"))["total"] == 3
             await worker.close()
         finally:
             await client.close()
@@ -189,14 +179,43 @@ def test_worker_fault_keeps_control_endpoint_alive(tmp_path):
 
 
 def test_unicode_logs_preserved_and_fit_datagram(tmp_path):
-    server = Supervisor({"simulate": True, "state_dir": str(tmp_path)})
-    message = "Ошибка камеры, подробное описание. " * 100
-    server.log("stream/stderr", "INFO", message)
-    assert "".join(r["message"] for r in server.history) == message
-    records = list(server.history)
-    for start in range(0, len(records), 2):
-        assert len(pack(envelope("sample", "log.sample", {
-            "subscription": "logs", "records": records[start:start+2], "dropped": 0}))) <= 1200
+    async def run():
+        server = Supervisor({"state_dir": str(tmp_path)})
+        receiver = udp_socket()
+        receiver.bind(("127.0.0.1", 0))
+        server.sock = udp_socket()
+        server.sock.bind(("127.0.0.1", 0))
+        session = Session(2**64 - 1, 2**64 - 1, receiver.getsockname(), "logs")
+        server.sessions[session.id] = session
+        await server.dispatch(session, "log.subscribe", {"after": 0})
+        message = "Ошибка камеры, подробное описание. " * 100
+        server.log("камера/" * 9, "INFO", message)
+        sender = asyncio.create_task(server._maintenance())
+        records = []
+
+        async def receive():
+            while len("".join(r["message"] for r in records)) < len(message):
+                raw, address = await asyncio.get_running_loop().sock_recvfrom(receiver, 65535)
+                assert address == server.sock.getsockname()
+                assert len(raw) <= UDP_LIMIT
+                packet = unpack(raw)
+                assert packet["op"] == "log.sample"
+                assert packet["session"] == session.id and packet["token"] == session.token
+                assert packet["body"]["dropped"] == 0
+                records.extend(packet["body"]["records"])
+
+        try:
+            await asyncio.wait_for(receive(), 3)
+            assert "".join(r["message"] for r in records) == message
+            sequences = [r["record_sequence"] for r in records]
+            assert sequences == list(range(sequences[0], sequences[0] + len(sequences)))
+            assert server.counters["oversize"] == 0
+        finally:
+            sender.cancel()
+            await asyncio.gather(sender, return_exceptions=True)
+            receiver.close()
+            server.sock.close()
+    asyncio.run(run())
 
 
 def test_dead_client_cleanup(tmp_path):
@@ -208,8 +227,7 @@ def test_dead_client_cleanup(tmp_path):
             await client.connect()
             await client.request("control.acquire")
             await client.request("mode.set", {"mode": "MANUAL"})
-            info = await client.request("videostream.create")
-            await client.request("videostream.start", {"stream_id": info["stream_id"], 'rtp_port':5004})
+            await client.request("videostream.subscribe", {"name": "stream", "rtp_port": 5004})
             for task in client.tasks:
                 task.cancel()
             await asyncio.gather(*client.tasks, return_exceptions=True)

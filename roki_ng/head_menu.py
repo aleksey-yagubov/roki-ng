@@ -96,6 +96,18 @@ class HeadMenu:
             self.cancel_requested = False
             self.action = asyncio.create_task(self._start(self.selected))
 
+    def hold(self, key):
+        """A hold is distinct from menu navigation; only an active game uses it."""
+        if key == 'back' and self.game_active and not self.finishing:
+            self.action = asyncio.create_task(self._pickup())
+
+    async def _pickup(self):
+        try:
+            await self.command('game.pickup', {})
+            self.say('Pick up')
+        except Exception as exc:
+            self._error(exc)
+
     def _error(self, exc):
         self.log("WARNING", str(exc))
         text = {
@@ -262,6 +274,7 @@ class HeadButtons:
         self.menu, self.log = menu, log
         self.device = None
         self.held = set()
+        self.hold_tasks = {}
 
     def event(self, event):
         # BTN2 was process reload. BTN3 is OK; BTN1/4 are left/right.
@@ -270,9 +283,24 @@ class HeadButtons:
             return
         if event.value == 0:
             self.held.discard(event.code)
+            task = self.hold_tasks.pop(event.code, None)
+            if task: task.cancel()
         elif event.value == 1 and event.code not in self.held:
             self.held.add(event.code)
             self.menu.press(keys[event.code])
+            if keys[event.code] == 'back':
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    # Unit-level navigation is synchronous.  The real input loop
+                    # always runs in asyncio, where the hold timer is installed.
+                    pass
+                else:
+                    async def held_back(code=event.code):
+                        await asyncio.sleep(.7)
+                        if code in self.held:
+                            self.menu.hold('back')
+                    self.hold_tasks[event.code] = loop.create_task(held_back())
 
     def open(self):
         from evdev import InputDevice, list_devices
@@ -309,6 +337,8 @@ class HeadButtons:
                 await asyncio.sleep(1)
 
     def close(self):
+        for task in self.hold_tasks.values(): task.cancel()
+        self.hold_tasks.clear()
         if self.device:
             self.device.close()
             self.device = None

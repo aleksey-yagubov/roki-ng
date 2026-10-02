@@ -31,14 +31,22 @@ def body(tmp_path, monkeypatch):
     instance = Body({"simulate": True, "parameters": Parameters(tmp_path).values},
                     lambda *args: None, lambda *args: None)
     instance.command("control.acquire", {})
+    instance.hardware.drained = lambda: True
     # Execute gait branches, but keep all hardware simulated.
     instance.simulated = False
     return instance
 
 
 def complete(body):
-    list(body.plan)
-    body._finish("completed")
+    ident = body.active
+    assert ident is not None
+    for _ in range(2000):
+        if body.active is None:
+            assert body.jobs[ident]["status"] == "completed", body.jobs[ident]
+            return
+        body.next_at = 0
+        body.tick()
+    pytest.fail("Job did not finish through Body.tick()")
 
 
 def walk(body, hold=True):

@@ -47,11 +47,34 @@ def test_catalog_and_descriptions_fit_udp():
         validate_args({"name": "jump_test", "count": 0})
 
 
-@pytest.mark.parametrize("mode,cycles", [
-    ("short", 11), ("long", 21), ("spot", 21), ("backwards", 21),
-    ("side_left", 20), ("side_right", 20), ("custom", 3)])
-def test_legacy_walk_cycle_counts(tmp_path, mode, cycles):
+@pytest.mark.parametrize("mode,cycles,step_sign,side_sign,right_first", [
+    ("short", 11, 1, 0, True), ("long", 21, 1, 0, True),
+    ("spot", 21, 0, 0, True), ("backwards", 21, -1, 0, True),
+    ("side_left", 20, 0, 1, False), ("side_right", 20, 0, 1, True),
+    ("custom", 3, -1, 1, False)])
+def test_run_variants_calculate_and_send_requested_motion(
+        tmp_path, monkeypatch, mode, cycles, step_sign, side_sign, right_first):
+    pytest.importorskip("starkit")
+    from roki_ng.motion.engine import Engine
+
     body, _ = make_body(tmp_path)
+    body.simulated = False
+    trajectories, sent = [], []
+    calculate = Engine.walk_Cycle
+    send = body.hardware.send
+
+    def walk(engine, step, side, yaw, *args):
+        trajectories.append((step, side, engine.first_Leg_Is_Right_Leg))
+        commands = list(calculate(engine, step, side, yaw, *args))
+        assert any(command[0] == "servo" for command in commands), "Cycle has no servo commands"
+        yield from commands
+
+    def record(values, frames, pause):
+        sent.append({(v.Id, v.Sio): v.Data for v in values})
+        send(values, frames, pause)
+
+    monkeypatch.setattr(Engine, "walk_Cycle", walk)
+    body.hardware.send = record
     args = {"name": "run_test", "mode": mode}
     if mode == "custom":
         args.update(cycles=3, step_mm=-12, side_mm=5, right_leg=False)
@@ -60,15 +83,36 @@ def test_legacy_walk_cycle_counts(tmp_path, mode, cycles):
     job = body.jobs[result["job_id"]]
     assert job["status"] == "completed"
     assert job["progress"] == cycles
+    assert len(trajectories) == cycles
+    sign = lambda value: (value > 0) - (value < 0)
+    assert all((sign(step), sign(side), right) == (step_sign, side_sign, right_first)
+               for step, side, right in trajectories)
+    # Real IK output reaches the hardware boundary, not just a progress counter.
+    knees = [frame[8, 1] for frame in sent if (8, 1) in frame]
+    assert len(set(knees)) > 1
+    assert all(0 <= value <= 16383 for frame in sent for value in frame.values())
+    assert body.pose == "stand"
 
 
-@pytest.mark.parametrize("direction", ["forward", "backward", "left", "right", "on_spot"])
-def test_jump_variants(tmp_path, direction):
+@pytest.mark.parametrize("direction,joint,sign", [
+    # Kondo wire directions for the right ankle/hip, after mounting inversion.
+    ("forward", 9, -1), ("backward", 9, 1),
+    ("left", 6, 1), ("right", 6, -1), ("on_spot", 9, 0)])
+def test_jump_variants_send_directional_targets(tmp_path, direction, joint, sign):
     body, _ = make_body(tmp_path)
+    sent = []
+    body.hardware.send = lambda values, *_: sent.append({(v.Id, v.Sio): v.Data for v in values})
     result = body.command("test.start", {"name": "jump_test", "direction": direction, "count": 2})
     finish(body)
     assert body.jobs[result["job_id"]]["status"] == "completed"
     assert body.jobs[result["job_id"]]["progress"] == 2
+    leg_frames = [frame for frame in sent if (joint, 1) in frame]
+    assert leg_frames, "No leg commands were sent"
+    offset = leg_frames[0][joint, 1] - 7500
+    assert (offset > 0) - (offset < 0) == sign
+    assert any(frame.get((10, 1), 7500) != 7500 for frame in leg_frames), "No jump impulse"
+    assert all(value == 7500 for (servo, _), value in leg_frames[-1].items()
+               if servo in (5, 6, 7, 8, 9, 10, 13))
 
 
 def test_cancel_does_not_save(tmp_path):

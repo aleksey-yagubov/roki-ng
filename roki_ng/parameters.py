@@ -21,11 +21,11 @@ COLOUR_DEFAULTS = {
 }
 
 SCHEMA = {
-    'game.geometry_verified': ('bool', False, None, None, 'next_game', 'Camera height and projection verified in goalkeeper crouch; required for physical game'),
+    "power.voltage_scale": ("float", 1.0, 0.5, 1.5, "next_job", "Калибровочный множитель напряжения аккумулятора: voltage_v = ADC * 10 / 2702 * множитель. Больше: выше показание. Поправка конкретной платы по мультиметру, не процент заряда. Изменять между движениями; применяется к следующему snapshot."),
+    'game.forward.kick_off_ride': ('bool', True, None, None, 'next_game', 'Run the central forward kickoff manoeuvre on the next immediate game start'),
     'game.camera_height_m': ('float', .4068, .2, .8, 'next_game', 'Measured optical centre height in goalkeeper posture, metres'),
     'game.head_tilt': ('int', -1500, -2600, 950, 'next_game', 'Fixed FIRA head tilt; head pan is centered'),
     'game.ball_max_distance_m': ('float', 3., .3, 4., 'next_game', 'Maximum usable ball distance'),
-    'game.ball_min_circularity': ('float', .65, .3, 1., 'next_game', 'Minimum orange contour circularity'),
     'game.deadband_m': ('float', .1, .05, .3, 'next_game', 'Lateral ball deadband, metres'),
     'game.max_heading_error_rad': ('float', .2, .05, .35, 'next_game', 'Stop when yaw drifts from initial heading'),
     'game.ball_loss_timeout_s': ('float', 3., .5, 10., 'next_game', 'Stop physical game when no valid ball is available'),

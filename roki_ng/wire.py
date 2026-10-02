@@ -81,6 +81,6 @@ def udp_socket():
 
 
 def envelope(kind, op="", body=None, *, session=0, token=0, id=0, sequence=0):
-    return {"v": 1, "kind": kind, "session": session, "token": token,
+    return {"kind": kind, "session": session, "token": token,
             "id": id, "sequence": sequence, "robot_mono_ns": time.monotonic_ns(),
             "op": op, "body": {} if body is None else body}

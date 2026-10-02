@@ -106,8 +106,9 @@ def run(role, fds):
                     elif driver is None:
                         raise Fault("not_ready", "Worker not initialized")
                     elif op == 'source.list':
-                        from .video_sources import describe_sources
-                        response['result'] = {'items': describe_sources(role)}
+                        describe = getattr(driver, 'video_source', None)
+                        source = describe() if describe else None
+                        response['result'] = {'items': [source] if source else []}
                     else:
                         response["result"] = driver.command(op, body)
                         if role == "motherboard" and sock is urgent and op in ("control.release", "control.takeover", "motion.stop_hard"):

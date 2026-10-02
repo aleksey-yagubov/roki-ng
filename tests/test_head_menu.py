@@ -255,7 +255,8 @@ def test_ready_only_after_all_worker_initializations(tmp_path, monkeypatch, fail
                 assert server.mode == "FAULT" and "Ready" not in events
                 assert "buttons" not in events
             else:
-                assert events == ["motherboard", "stream", "camera", "detection", "localisation", "buttons", "Ready"]
+                assert set(events[:-2]) == set(server.workers)
+                assert events[-2:] == ["buttons", "Ready"]
         finally:
             await server.close()
     asyncio.run(run())

@@ -628,7 +628,7 @@ class Body:
     def _body_telemetry(self):
         now = time.monotonic()
         return {"body.imu": self.body_imu.state(now),
-                "body.power": self.body_power.state(now),
+                "body.power": self.body_power.state(now, self.parameters["power.voltage_scale"]),
                 "body.servos": self.body_servos.state(now),
                 "body.stabilization": self.stabilizer.state(self.parameters) | {
                     "diagnostics": self.stabilization_diagnostics.result,
