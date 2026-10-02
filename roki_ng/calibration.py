@@ -151,9 +151,15 @@ class TestPlan:
         for cycle in range(cycles):
             if self.body.stop_requested:
                 break
-            measured = self.yaw()
             correction = rotation
             if correction is None:
+                # Heading hold is the only gait mode which needs a live body
+                # yaw for every cycle.  In particular, rotation_test has a
+                # prescribed rotation and the original procedure samples the
+                # IMU only before and after each ten-cycle series.  Polling it
+                # here adds synchronous RCB traffic between queued leg frames
+                # and can make an otherwise healthy body link time out.
+                measured = self.yaw()
                 limit = self.parameters["walk.heading_max_correction_rad"]
                 correction = max(-limit, min(limit, wrap(measured - self.origin) * self.parameters["walk.heading_kp"]
                                            * (-1 if right_leg else 1)))
@@ -164,7 +170,6 @@ class TestPlan:
                 yield "sleep", 0.01
             yield "drain",
             completed += 1
-            self.yaw()
             self.mark("walking")
         if engine:
             if completed and self.body.stop_requested:
