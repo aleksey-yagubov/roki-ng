@@ -101,7 +101,7 @@
 - [MOTHERBOARD_HARDWARE.md](MOTHERBOARD_HARDWARE.md): разводка STM32 головы,
   назначение периферии и расхождения с текущими исходниками прошивки.
 
-- [OPERATOR_PROTOCOL_V1.md](OPERATOR_PROTOCOL_V1.md): точный реализованный API
+- [OPERATOR_PROTOCOL.md](OPERATOR_PROTOCOL.md): точный реализованный API
   ручного runtime и инструкция для разработки Qt-клиента.
 - [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md): текущая реализация,
   происхождение алгоритмов, ограничения и проверки перед подключением робота.

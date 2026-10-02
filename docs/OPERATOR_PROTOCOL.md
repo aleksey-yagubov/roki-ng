@@ -1,9 +1,10 @@
-# Протокол оператора v1: реализованный ручной runtime
+# Протокол оператора: текущий runtime
 
-Этот документ задаёт точный контракт версии `manual-1`, реализованной в Python.
-Он является спецификацией для первого Qt-клиента. Архитектурный документ
-[PROTOCOL_AND_MEDIA.md](PROTOCOL_AND_MEDIA.md) описывает также будущие возможности;
-их наличие нельзя предполагать по одному номеру `v=1`.
+GUI и roki-ng развиваются и обновляются синхронно: существует один текущий
+контракт без версий, согласования версий и совместимости с прошлыми вариантами.
+Этот документ описывает реализованный интерфейс. Архитектурный документ
+[PROTOCOL_AND_MEDIA.md](PROTOCOL_AND_MEDIA.md) содержит также будущие возможности;
+их наличие проверяется по каталогу операций и capabilities, не по номеру версии.
 
 ## Подключение и транспорт
 
@@ -25,7 +26,6 @@ session token предотвращает смешение сессий. Подк
 
 ```json
 {
-  "v": 1,
   "kind": "request",
   "session": 123,
   "token": 456,
@@ -39,7 +39,6 @@ session token предотвращает смешение сессий. Подк
 
 | Поле | Тип и смысл |
 | --- | --- |
-| `v` | Integer, ровно `1` |
 | `kind` | `hello`, `welcome`, `request`, `response`, `event`, `sample` |
 | `session`, `token` | Integer uint64; 0 в hello; сервер выдаёт ненулевые значения |
 | `id` | Integer uint64; >0 у hello/request/response, 0 у event/sample |
@@ -55,14 +54,14 @@ uint64 в обычном `Number`: транспорт и сравнения ID �
 Hello:
 
 ```json
-{"v":1,"kind":"hello","session":0,"token":0,"id":1,"op":"hello",
- "body":{"versions":[1],"client_name":"roki-qt","client_instance":"random-per-client-instance"}}
+{"kind":"hello","session":0,"token":0,"id":1,"op":"hello",
+ "body":{"client_name":"roki-qt","client_instance":"random-per-client-instance"}}
 ```
 
 `client_instance`: непустая строка до 64 символов. Повтор hello с тем же адресом и
 instance возвращает ту же сессию. `welcome` содержит session/token в конверте, а в
 body: `robot_id`, `boot_id`, `heartbeat_ms=500`, `session_timeout_ms=2000`,
-`drive_timeout_ms=350`, `state`, `capabilities_revision="manual-1"`,
+`drive_timeout_ms=350`, `state`,
 `max_datagram=1400`. Максимум четыре одновременные сессии. Неверный token/endpoint,
 повреждённый пакет или отсутствие свободной сессии не вызывают ответа.
 
@@ -123,7 +122,8 @@ datastream не подтверждаются и не повторяются. П�
 
 Только один оператор владеет control. Второй получает `busy`. Во все изменяющие
 состояние requests добавляется `body.lease_epoch`. Исключения: собственные
-подписки/log filters/session.close и `videostream.attach/detach` текущей сессии.
+подписки/log filters/session.close, `videostream.unsubscribe` своей сессии и
+`videostream.subscribe` на уже работающий выход.
 После отзыва старые команды отвергаются. Внутренний urgent barrier также удаляет
 ещё не исполненные команды из normal socket worker-а.
 
@@ -158,7 +158,7 @@ queue, но сохраняет процессы. При потере lease хо�
 
 | Операция | Аргументы | Результат |
 | --- | --- | --- |
-| `system.capabilities` | `{}` | revision, modes, body, video_backends, data_topics, future, hardware_slots, simulated |
+| `system.capabilities` | `{}` | modes, body, video_codec, data_topics, future, hardware_slots, simulated |
 | `system.operations` | пагинация | Строковые имена поддерживаемых операций |
 | `system.status` | `{}` | state, owner (session ID/null), boot_id, workers, counters |
 | `system.restart_stream_worker` | lease_epoch | `restarted: stream` |
@@ -260,7 +260,7 @@ native-пути `body_connected` нельзя считать надёжным а
 Оператор отправляет `kind=sample`, `op=motion.drive`, `id=0` примерно 20 раз/с:
 
 ```json
-{"v":1,"kind":"sample","session":123,"token":456,"id":0,"sequence":17,
+{"kind":"sample","session":123,"token":456,"id":0,"sequence":17,
  "op":"motion.drive","body":{"lease_epoch":1,"x":1,"y":0,"yaw":0,
  "speed":0.5,"crouch":"centered","heading_hold":true}}
 ```
@@ -525,30 +525,44 @@ gain и red/blue gains. Set/freeze не сохраняют JSON, save сохра
 Requested controls и измеренные метаданные различаются. Camera.status и
 datastream camera.state описывают именно camera-worker.
 
-Все операции видео теперь в `videostream.*`, без алиасов `video.*`.
-Sources возвращает каталог возможных источников, включая недоступные.
-List возвращает созданные определения, включая остановленные.
-Create принимает source (direct-gst/runtime/localisation), настройки выхода
-и кодека, но не адрес получателя. Start принимает stream_id и rtp_port;
-IP берётся из управляющей сессии.
+Видеовыходы используют текущий videostream-контракт, только H.264.
+Нет отдельной версии видео: GUI и runtime обновляются вместе.
+Каталог videostream.list опрашивает настроенные воркеры через source.list:
+имя выхода равно имени производителя, показаны и недоступные выходы с причиной.
+Нет отдельного создания определения, UUID и выбора кодека.
 
-Только владелец управления создаёт, запускает, изменяет, останавливает и
-удаляет передачи. Наблюдатель может attach/detach к работающему стриму.
-Потеря сессии удаляет только её получателя. Последний получатель отключился:
-encoder/RTP и дополнительный видеовыход производителя останавливаются;
-сама runtime-камера и алгоритмы продолжают работать.
-Потеря lease не выключает просмотр. Новый владелец управляет всеми стримами.
+| Операция | Аргументы | Результат |
+| --- | --- | --- |
+| videostream.capabilities | {} | codec=h264, mtu=1400, max_receivers=4 |
+| videostream.list | offset=0, limit=1 | items с settings/controls/state/available/producer, total, next_offset |
+| videostream.status | name | Состояние, настройки, подписка текущей сессии, RTP и счётчики |
+| videostream.subscribe | name, rtp_port, settings? | Запуск владельцем или подключение к работающему выходу |
+| videostream.unsubscribe | name | Отписка только текущей сессии |
+| videostream.update | lease_epoch, name, settings | Общие настройки выхода |
+| videostream.stop | lease_epoch, name | Остановка для всех, удаление получателей |
 
-Один encoder обслуживает несколько адресов через multiudpsink. Несколько
-разных runtime-передач разрешены, в том числе с одинаковым источником;
-direct-gst требует эксклюзивного захвата.
-Max_fps runtime/localisation меняется через videostream.update без перезапуска
-и ограничивает копирование/кодирование, не частоту камеры или детектора.
-Bitrate H.264 пока меняется только на остановленном стриме.
+Запуск через subscribe требует lease_epoch. Наблюдатель может подписаться на
+работающий выход без управления. IP берётся из сессии. Подписка без settings
+использует текущие настройки; отличающиеся настройки работающего выхода дают
+settings_conflict, не незаметный перезапуск.
 
-Каждый start создаёт новый run_id/SSRC. Exact_osd=false:
-UnicamSequence RTP extension и MessagePack OSD этим этапом не реализованы.
-Просмотры/окна существуют только на стороне GUI.
+Один encoder обслуживает все адреса выхода через multiudpsink. Последний
+получатель отключился: кодер и дополнительный preview производителя
+останавливаются, рабочая камера и алгоритмы продолжаются. Stop удаляет все
+подписки; запросы каталога/status не возобновляют передачу.
+Потеря lease не выключает просмотр остальных и не останавливает игру.
+
+Controls объявляет производитель: fixed означает всегда read-only, live
+разрешает изменение владельцем без перезапуска; остальные поля блокируются
+при starting/running. Геометрия camera/localisation фиксирована 800x650.
+Max_fps ограничивает подачу кадров до копирования, не частоту камеры/детектора.
+Bitrate и fps кодировщика меняются только при остановленной передаче.
+Каждый новый запуск получает новый run_id/SSRC; повторная подписка их не меняет.
+
+Полные схемы, ошибки и примеры:
+[CAMERA_VIDEOSTREAM_PROTOCOL.md](CAMERA_VIDEOSTREAM_PROTOCOL.md).
+UnicamSequence RTP extension и MessagePack OSD ещё не реализованы:
+exact_osd=false. Просмотры/окна существуют только на стороне GUI.
 
 ## Запрашиваемые datastream
 
@@ -557,7 +571,7 @@ UnicamSequence RTP extension и MessagePack OSD этим этапом не ре�
 Состояния workers являются snapshots состояния
 процессов, не измеренной телеметрией серв/IMU. Body state:
 state (ready/fault), pose, active_job, head (заданные ticks), error, simulated.
-Stream state: state, active_streams [{stream_id, source, state}], packets,
+Stream state: state, active_streams [{name, transport, state, dependencies}], packets,
 frames_submitted, frames_skipped, simulated.
 Skipped учитывает видимые читателю пропуски/ограничение FPS,
 не все возможные потери сети.
@@ -593,13 +607,13 @@ pixels_min, box_area_min. L в 0..100, a/b в -128..127. Min не больше m
 Начальные пороги — только стартовые значения, не калибровка данного поля.
 
 Это диагностический datastream, **не реализация OSD**. Внутри головы отдельный
-iceoryx2 сервис roki/detection/blobs/v1 публикует MessagePack результата размером
+iceoryx2 сервис roki/detection/blobs публикует MessagePack результата размером
 до 4096 байт с исходным ID кадра. Для точной геометрии будущая локализация
 должна сопоставить этот ID с синхронной IMU, а не использовать последнее измерение.
 
 | Операция | Аргументы | Результат |
 | --- | --- | --- |
-| `data.list` | `{}` | items: name, kind=state, max_rate_hz (зависит от topic), schema=1 |
+| `data.list` | `{}` | items: name, kind=state, max_rate_hz (зависит от topic) |
 | `data.snapshot` | topic | topic, valid, source_mono_ns, age_ms, data |
 | `data.subscribe` | topic, rate_hz [0.2,max_rate_hz], default min(2,max_rate_hz) | subscription_id=topic, rate_hz |
 | `data.update` | topic, rate_hz | То же, заменяет подписку |
@@ -631,15 +645,24 @@ iceoryx2 сервис roki/detection/blobs/v1 публикует MessagePack р�
 
 - `voltage_v`: напряжение в вольтах (float) или null, **не процент заряда**;
 - `adc_raw`: исходное беззнаковое 16-битное значение или null;
+- `voltage_scale`: применённый калибровочный множитель из `power.voltage_scale`;
 - `valid`, `source_mono_ns`, `timestamp_kind="host_receive"`;
 - `sequence`: счётчик успешных чтений, не номер измерения АЦП;
 - `simulated`: синтетические значения в режиме симуляции;
 - `busy_reads`, `invalid_reads`, `error`: диагностика чтения.
 
 Motherboard-worker читает два байта little-endian по адресу Зубра `0xCC` через
-Roki и считает `voltage_v = adc_raw * 10.0 / 2702.0`. Это коэффициент прошивки
-Зубра, не индивидуальная метрологическая калибровка платы; GUI не пересчитывает ADC.
-Например, 3242 соответствует примерно 12.00 В. Порогов процентов заряда и
+Roki и считает `voltage_v = adc_raw * 10.0 / 2702.0 * power.voltage_scale`.
+Базовый коэффициент взят из порогов разряда прошивки Зубра и может давать
+заметную ошибку на конкретной плате. `power.voltage_scale` (default 1.0,
+диапазон 0.5..1.5) хранится в параметрах конкретного робота, не в общих дефолтах.
+Одноточечная калибровка: `новый множитель = старый множитель * U_мультиметра / U_показанное`,
+при одновременном измерении и неизменной нагрузке. Применение через `params.set`
+владельцем управления между движениями, без перезапуска; следующий snapshot
+пересчитывает и кешированный ADC без изменения его timestamp. GUI показывает
+готовые вольты, повторно множитель не применяет. Одна точка не определяет
+постоянное смещение ADC и не гарантирует точность во всём диапазоне питания.
+Например, при множителе 1.0 ADC 3242 соответствует примерно 12.00 В. Порогов процентов заряда и
 автоматической остановки робота этот источник не добавляет.
 
 Все подписчики используют один опрос с периодом 1 с. Разовый snapshot использует
@@ -842,7 +865,7 @@ supervisor пытается откатить уже применённые зн�
 `motion.rejected {error}`. Клиентская библиотека добавляет локальное событие
 `client.connection_error`. Events могут теряться: состояние всегда проверяется
 status/snapshot. События jobs направляются владельцу control, события видео
-создателю stream. Общие faults видят подключённые сессии.
+рассылаются подключённым сессиям. Общие faults видят подключённые сессии.
 
 Основные error codes: `invalid_argument`, `not_supported`, `not_found`,
 `not_ready`, `not_owner`, `busy`, `invalid_state`,
@@ -860,8 +883,8 @@ code, не разбирает сообщение. retryable означает в�
 3. По Connect Control: control.acquire, затем mode.set MANUAL.
 4. Кнопки движений вызывают requests, WASD посылает drive samples; при потере
    фокуса/отпускании всех клавиш посылается zero drive. Не создавать очередь кликов.
-5. Запросить videostream.sources/list. Для новой передачи: create, подготовить
-   receiver, start с rtp_port. Наблюдатель вызывает attach к работающей передаче.
+5. Запросить videostream.list. Подготовить receiver, вызвать subscribe с name и
+   rtp_port. Наблюдатель подписывается только на уже работающий выход.
    События videostream.started/failed дополняются запросами status.
 6. Подписки motion.state/camera.state/videostream.state и job.status
    восстанавливают потерянные события.
@@ -1031,18 +1054,16 @@ GUI скрывает маркер при остановке, ошибке, ра�
 
 ## Обработанное видео локализатора
 
-`videostream.create` принимает `source="localisation"`: рамки стоек, круг и отрезки
-рисуются на роботе до кодирования, 800×650 BGR, без sensor в запросе.
-`videostream.start` требует уже запущенной локализации и камеры. Управление, кодеки,
-адрес получателя и жизненный цикл — как у runtime video. Подробнее: LOCALISATION_VIDEO.md.
+Выход с name="localisation" объявляет локализатор: рамки стоек, круг и отрезки
+рисуются на роботе до кодирования, 800x650 BGR.
+Videostream.subscribe требует уже запущенных локализации и камеры.
+Подробнее: [LOCALISATION_VIDEO.md](LOCALISATION_VIDEO.md).
 
 Размеченные кадры готовятся только по внутреннему source.start и при наличии
-подписки стрим-воркера на диагностический источник. `videostream.create`,
-`localisation.start` и `data.subscribe` сами по себе рисование не включают.
-Остановка последней передачи источника закрывает подписку и прекращает
-подготовку картинки, не вычисление локализации. Закрытие сессии удаляет только
-её получателя; передача для остальных продолжается.
-Повторный `videostream.start` возобновляет картинку без перезапуска локализации.
+подписки стрим-воркера. Videostream.list, localisation.start и data.subscribe
+сами по себе рисование не включают. Отписка последнего получателя закрывает
+передачу и прекращает подготовку картинки, не вычисление локализации.
+Новый subscribe возобновляет preview без перезапуска алгоритма.
 
 Диагностический результат локализации: `goal_candidates` содержит только стойки,
 прошедшие проверку основания по matched-позе (до двух на цвет). `goal_rejected`

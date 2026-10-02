@@ -54,9 +54,9 @@ dataplane.py создаёт iceoryx2 publish/subscribe и event с одинак�
 
 | Сервис | Данные | Буфер подписчика |
 | --- | --- | ---: |
-| roki/camera/frame/v1 | заголовок и BGR-пиксели | 4 |
-| roki/motherboard/imu/v1 | sequence, время Bosch, quaternion, sensor ID | 128 |
-| roki/detection/blobs/v1 | MessagePack, до четырёх областей с ID кадра | 4 |
+| roki/camera/frame | заголовок и BGR-пиксели | 4 |
+| roki/motherboard/imu | sequence, время Bosch, quaternion, sensor ID | 128 |
+| roki/detection/blobs | MessagePack, до четырёх областей с ID кадра | 4 |
 
 Publisher запрашивает loan, заполняет его и передаёт владение iceoryx2.
 В случае ошибки заполнения запись не публикуется. В camera-worker необходима

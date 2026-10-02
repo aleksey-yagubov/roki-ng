@@ -35,7 +35,7 @@ Football (навигация; игровой worker ещё отсутствуе�
 подъёма с проверкой результата. Это не фоновое восстановление после падения.
 Get up test выполняет только этот этап. Проверено локально; аппаратная проверка
 IMU тела и самих подъёмов ещё обязательна. Подробности: HEAD_MENU.md и
-OPERATOR_PROTOCOL_V1.md. Локальный набор после изменений: 110 passed.
+OPERATOR_PROTOCOL.md. Локальный набор после изменений: 110 passed.
 
 Работают supervisor и четыре worker-а: motherboard, camera, stream, detection. Runtime Roki
 переведён на USB ACM v2; старый UART RPC больше не вызывается. Camera-worker

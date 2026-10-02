@@ -37,7 +37,7 @@
 - Optional dependencies `localisation`: NumPy и OpenCV. SciPy нужен только
   отдельным старым offline-инструментам/эталонному тесту, не runtime.
 
-API и точные ограничения описаны в [OPERATOR_PROTOCOL_V1.md](OPERATOR_PROTOCOL_V1.md).
+API и точные ограничения описаны в [OPERATOR_PROTOCOL.md](OPERATOR_PROTOCOL.md).
 Идентификатор capture_id сейчас обозначает запуск локализатора и не является
 аппаратным счётчиком или timestamp камеры.
 

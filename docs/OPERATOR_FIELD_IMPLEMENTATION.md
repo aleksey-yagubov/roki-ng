@@ -24,7 +24,7 @@
   camera-worker передаёт изменения следующему Request без stop/configure.
   Высота камеры также параметр, применяется на следующем старте локализации.
 
-Полный контракт: [OPERATOR_PROTOCOL_V1.md](OPERATOR_PROTOCOL_V1.md).
+Полный контракт: [OPERATOR_PROTOCOL.md](OPERATOR_PROTOCOL.md).
 Инструкция GUI: `roki-ng-operator-gui/docs/FIELD_EDITOR.md`.
 
 ## Defaults и перенос

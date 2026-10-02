@@ -38,8 +38,8 @@ UART5 остаётся только загрузчику. Старый UART trac
 
 | Имя | Формат little endian | Содержание |
 | --- | --- | --- |
-| roki/camera/frame/v1 | `<IQIII` + пиксели | Unicam uint32, SensorTimestamp uint64 нс, width/height/stride uint32, BGR |
-| roki/motherboard/imu/v1 | `<IQffffI` | STM sequence в uint32, timestamp Bosch uint64 нс, quaternion x/y/z/w float32, sensor ID uint32 |
+| roki/camera/frame | `<IQIII` + пиксели | Unicam uint32, SensorTimestamp uint64 нс, width/height/stride uint32, BGR |
+| roki/motherboard/imu | `<IQffffI` | STM sequence в uint32, timestamp Bosch uint64 нс, quaternion x/y/z/w float32, sensor ID uint32 |
 
 STM sequence физически 16-битный; поле shared memory uint32 не увеличивает
 его диапазон. Не предполагается непрерывный захват дольше оборота счётчика.
@@ -70,7 +70,7 @@ ISP DMA buffer копируется в iceoryx2 loan один раз, без pad
 Команда camera.start требует MANUAL и действующую lease; camera.stop требует
 lease, но не ограничена режимом MANUAL. Camera.status доступен наблюдателю.
 Схема команд описана в
-[OPERATOR_PROTOCOL_V1.md](OPERATOR_PROTOCOL_V1.md).
+[OPERATOR_PROTOCOL.md](OPERATOR_PROTOCOL.md).
 
 `camera.status.imu_sync.state`: disabled, aligning, matched, synced.
 Matched означает найденное смещение, но ещё не подтверждённое переключение

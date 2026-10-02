@@ -21,3 +21,9 @@ Tech stack: Python, OpenCV, iceoryx2, asyncio, PySide6/QML.
 - [x] Review: inspect all paths and cancellation races, run relevant tests on developer computer, report actual limitations. Documentation and commits only after verification.
 
 Validation: 52 focused runtime tests passed on developer Mac, 84 GUI tests and QML smoke passed. Process/IPC integration tests require a Linux developer environment; hardware motion remains unverified.
+
+Уточнение от 2026-10-02: отбор мяча приближен к оригинальному цветовому детектору.
+Проверки формы и ожидание трёх стабильных наблюдений удалены; окружение может быть
+зелёным или белым, из подходящих кандидатов выбирается ближайший. Проверки
+свежести сохранены. Текущий алгоритм описан в
+[RUNTIME_VIDEO_AND_DETECTION.md](../../RUNTIME_VIDEO_AND_DETECTION.md#игровое-наблюдение-мяча).

@@ -7,18 +7,16 @@ UnicamSequence остаются отдельным этапом.
 
 ## Явный запрос
 
-Источник всегда виден в videostream.sources, но становится доступным только
+Источник всегда виден в videostream.list, но становится доступным только
 при работающих camera-worker и локализации. Запрос каталога ничего не запускает.
-После camera.start и localisation.start владелец управления создаёт передачу:
+После camera.start и localisation.start владелец управления запрашивает передачу:
 
 ```text
-videostream.create {"source":"localisation","output":{"width":800,"height":650,"fps":30},"max_fps":15,"codec":{"name":"h264","bitrate":2000000}}
-videostream.start {"stream_id":"ID ИЗ CREATE","rtp_port":5006}
+videostream.subscribe {"name":"localisation","rtp_port":5006,"settings":{"fps":30,"max_fps":15,"bitrate":2000000}}
 ```
 
-Reference Client добавляет lease_epoch. Не передавать sensor: геометрией
-захвата владеет camera-worker. Выход передачи не больше 800x650.
-Для RTP/JPEG размеры кратны 8, например 800x648.
+Reference Client добавляет lease_epoch. Геометрия фиксирована производителем:
+800x650, без изменения размеров и без дополнительных настроек sensor. Кодек H.264.
 
 Supervisor посылает локализатору внутренний source.start, затем stream-worker
 подписывается FrameReader на LOCALISATION_TOPIC и запускает encoder.
@@ -26,11 +24,12 @@ Supervisor посылает локализатору внутренний source
 подписчика iceoryx2. Без спроса нет рисования, loans и копирования пикселей.
 Перед публикацией спрос проверяется повторно: начатое рисование может
 закончиться уже после stop, но не должно породить ненужную публикацию.
-Create и data.subscribe(localisation.state) видеовыход не включают.
+Videostream.list и data.subscribe(localisation.state) видеовыход не включают.
 
 Состояния различаются:
-- Source.output.requested: диагностический выход запрошен.
-- Source.output.publishing/frames/age_ms/error: приходят ли обработанные кадры.
+- Videostream.status.producer.requested: диагностический выход запрошен.
+- Videostream.status.producer.publishing: производитель выдаёт обработанные кадры.
+- Внутренний IPC source.status содержит frames/age_ms/error дополнительного выхода.
 - Videostream.status.state/packets/actual_fps: работает ли encoder/RTP.
 - Localisation.status.running/result: продолжается ли собственно вычисление.
 
@@ -40,7 +39,7 @@ Create и data.subscribe(localisation.state) видеовыход не вклю�
 2. Локализатор сопоставляет кадр с IMU, находит разметку и считает позу.
 3. По запросу видео отрезки и круг проецируются обратно в исходный кадр;
    рисуются кандидаты стоек и оценка.
-4. Результат публикуется в `roki/localisation/frame/v1` как FRAME_HEADER + BGR,
+4. Результат публикуется в `roki/localisation/frame` как FRAME_HEADER + BGR,
    сохраняя sequence/timestamp исходного кадра.
 5. Stream-worker кодирует изображение и отправляет RTP. Низкий max_fps
    ограничивает копирование в encoder; он не замедляет сам алгоритм.
@@ -65,30 +64,29 @@ Create и data.subscribe(localisation.state) видеовыход не вклю�
 ## Получатели и остановка
 
 ```text
-camera -> roki/camera/frame/v1 -> runtime encoder -> multiudpsink
+camera -> roki/camera/frame -> runtime encoder -> multiudpsink
          |
-         +-> localisation + roki/motherboard/imu/v1
-             -> запрошенный roki/localisation/frame/v1
+         +-> localisation + roki/motherboard/imu
+             -> запрошенный roki/localisation/frame
                  -> localisation encoder -> multiudpsink
 ```
 
-Несколько runtime/localisation передач разрешены, включая несколько передач
-одного источника. Для одного видео нескольким операторам достаточно одной
-передачи и нескольких attach: дополнительного encoder не создаётся.
-Каждая сессия имеет один адрес на передачу; разные передачи требуют разных
-IP:порт. Direct-gst не работает одновременно с runtime-захватом.
+Camera и localisation имеют по одной общей передаче; их можно смотреть
+одновременно. Повторный subscribe добавляет адрес в multiudpsink без второго
+кодировщика. Каждая сессия имеет один адрес на выход; разные выходы требуют
+разных IP:порт. Direct-gst не работает одновременно с рабочим захватом.
 
-Отсоединение последнего получателя останавливает его RTP pipeline.
-Если нет других передач этого источника, supervisor вызывает source.stop:
-локализатор перестаёт рисовать, но продолжает вычисления и datastream.
+Отсоединение последнего получателя останавливает RTP pipeline и supervisor
+вызывает source.stop: локализатор перестаёт рисовать, но продолжает вычисления
+и datastream.
 Publisher может оставаться открытым, не занимая loans без спроса.
 Остановка локализации закрывает только зависимые передачи, не основную камеру.
 Camera.stop закрывает все зависимые передачи и алгоритмы.
 
 Ошибки рисования/публикации отключают только видеовыход до следующего запуска
 локализации и пишут WARNING; вычисления продолжаются. Уже работающий pipeline
-без новых кадров завершится по штатному таймауту RTP. Новый start такого
-выхода возвращает source_fault. Фатальная ошибка вычислений отдельно даёт
+без новых кадров завершится по штатному таймауту RTP. Новый subscribe недоступного
+выхода отклоняется с not_ready и причиной из каталога. Фатальная ошибка вычислений отдельно даёт
 localisation.fault и останавливает зависимое видео.
 Пустая область поля является пропущенным наблюдением, не фатальной ошибкой.
 

@@ -144,7 +144,7 @@ GUI показывает принятые образцы, покрытие из�
 
 ## Пошаговая калибровка
 
-Исполняемый ручной этап описан в [OPERATOR_PROTOCOL_V1.md](OPERATOR_PROTOCOL_V1.md#тесты).
+Исполняемый ручной этап описан в [OPERATOR_PROTOCOL.md](OPERATOR_PROTOCOL.md#тесты).
 Каталог выдаётся через test.list/test.describe: run_test с режимами,
 jump_test с направлением/количеством, единый rotation_test и kick_test.
 Сценарии и расчёты находятся в calibration.py; worker исполняет их кооперативно,

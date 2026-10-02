@@ -1,101 +1,83 @@
-# Передача GUI: камера, стримы, просмотры
+# GUI: упрощённые видеовыходы
 
-Контракт реализован в roki-ng 01.10.2026. GUI в этом изменении не редактировался.
-Главный документ: [CAMERA_VIDEOSTREAM_PROTOCOL.md](CAMERA_VIDEOSTREAM_PROTOCOL.md).
-Оболочка запросов и lease: [OPERATOR_PROTOCOL_V1.md](OPERATOR_PROTOCOL_V1.md).
+Реализовано 02.10.2026 в roki-ng. Ответ на
+`roki-ng-operator-gui/docs/VIDEOSTREAM_SIMPLIFICATION_HANDOFF.md`.
+Полный wire-контракт: [CAMERA_VIDEOSTREAM_PROTOCOL.md](CAMERA_VIDEOSTREAM_PROTOCOL.md).
 
-## Что изменить
+## Обязательные изменения
 
-1. Заменить все video.* на videostream.*. Совместимости и алиасов нет.
-   Поле create теперь source, не backend. Destination в create отсутствует.
-2. Панель «Камера»: camera.start/stop/status/capabilities. Только runtime-захват
-   1600x1300 RAW10 -> 800x650 BGR, всегда с IMU. Удалить with_imu и выбор геометрии
-   здесь. Для старта нужен MANUAL. Во время aligning кадры уже могут поступать;
-   синхронизация IMU готова только при synced.
-3. ISP: camera.controls.list, отдельные «Применить» (set) и «Сохранить» (save).
-   Freeze фиксирует измеренные AE/AWB, но не пишет JSON. Не смешивать requested
-   и measured; supported=null до открытия камеры не означает false.
-4. «Источники»: явный videostream.sources с пагинацией по 1 элементу. Показывать
-   и available=false с причиной. Запрос списка не запускает ничего.
-   Источники direct-gst, runtime, localisation. Детектор пока без видеовыхода.
-5. «Передачи»: videostream.list с пагинацией по 4, включая stopped/failed.
-   Создание/запуск/обновление/stop/destroy разрешать текущему владельцу управления,
-   не только создателю стрима. Отдельных прав на видео нет.
-6. До start/attach открыть локальный UDP receiver и передать rtp_port.
-   Start требует lease и добавляет вызывающего первым получателем.
-   Наблюдатель использует attach только к starting/running. IP робот берёт сам.
-   Для одной передачи несколько просмотров используют один receiver/decoder.
-7. Кнопка подключения/отключения получателя вызывает attach/detach. Создание,
-   перенос и закрытие docking-просмотров не отправляют никаких команд роботу.
-   Stop является отдельным действием: он отключает всех, не только свой GUI.
-8. После остановки и нового start старые attach не восстанавливаются автоматически.
-   Смена run_id/SSRC требует очистки очередей приёма/привязки. Stream_id сохраняется
-   до destroy/рестарта stream-worker. События не гарантированы: обновлять list/status.
-9. Потеря control lease не останавливает просмотр. При потере heartbeat робот
-   отсоединяет только эту сессию; когда получателей нет, сам останавливает передачу.
-   Последний detach runtime не останавливает камеру/детектор/локализацию.
-10. Для runtime/localisation показать изменяемый max_fps: videostream.update
-    без перезапуска. Его верхний предел output.fps, который задаётся при create.
-    Direct-gst использует только output.fps capture caps, не live max_fps.
-    Bitrate меняется update только при stopped; codec/size/source требуют пересоздания.
-11. Datastream camera.state теперь действительно про камеру. Для списка активных
-    encoder-ов добавлен videostream.state. Подробный videostream.status показывает
-    receivers, attached, destination, actual_fps, counters и negotiated_caps.
-12. Не ограничивать UI одним H.264. Несколько передач допускаются, но железо
-    может отказать при перегрузке. Один поток на несколько операторов использует
-    один кодировщик, а не отдельный на каждого.
+1. GUI и roki-ng обновлять синхронно, без выбора версии и совместимости.
+   В UDP-конверте больше нет v; в hello нет versions; из welcome удалён
+   capabilities_revision. System.capabilities не содержит revision/videostream_api,
+   videostream.capabilities не содержит api_version, data.list не содержит schema.
+   Проверять доступные операции и реальные controls, а не номера API.
+2. Удалить UI create/destroy, определения с UUID и выбор кодека. Только H.264.
+   Не использовать старые start/attach/detach/sources.
+3. Каталог брать из `videostream.list`, страницы по одному элементу до
+   next_offset=null. Не хардкодить имена: их объявляют воркеры.
+   Текущие имена: stream (раньше direct-gst), camera (раньше runtime), localisation.
+   Неработающие известные выходы показывать с available/reason.
+4. Поля строить по controls, значения брать из settings.
+   fixed=true всегда read-only; live=true доступно владельцу во время работы.
+   Остальные поля блокируются после запуска. Наблюдателю заблокированы все.
+   Отдельные разделы startup/live не нужны.
+5. Геометрия camera/localisation фиксирована производителем: 800x650.
+   Удалить JPEG, 800x648, автоматический resize/padding. Другой воркер может
+   объявить другое разрешение: не предполагать 800x650 для любого выхода.
+6. «Смотреть»: сначала подготовить receiver H264/PT96/90000, затем subscribe
+   с name и rtp_port. Для остановленного выхода владелец может передать settings.
+   Для работающего выхода settings НЕ передавать: используются текущие общие.
+7. «Отключиться»: unsubscribe {name}. Общая остановка владельцем — stop {name},
+   с предупреждением, если есть другие получатели. Stop снимает все подписки.
+8. Изменяемое поле отправлять через update {name,settings:{ключ:значение}}.
+   После успеха перечитать status/settings. При settings_conflict обновить
+   состояние и показать действующие настройки, не останавливать другого скрытно.
+9. Открытие/закрытие dock-панели — только локальная операция. На имя выхода
+   один UDP receiver/декодер, несколько локальных просмотров без новых подписок.
+10. После reconnect/смены boot_id повторно запросить каталог и status.
+    После нового run_id/SSRC очистить старый приём. Не автозапускать остановленное
+    видео из-за сохранённых панелей. При неизвестном исходе subscribe проверить
+    status.subscribed, повтор той же подписки не создаёт дубль.
 
-## Минимальная последовательность
-
-Все примеры обозначают op и body; оболочку, ID, token и lease добавляет клиент.
+## Сообщения
 
 ```text
-control.acquire {}
-mode.set {"mode":"MANUAL","lease_epoch":1}
-camera.start {"lease_epoch":1}
-videostream.sources {"offset":0,"limit":1}
-videostream.create {"lease_epoch":1,"source":"runtime","output":{"width":800,"height":650,"fps":60},"max_fps":15,"codec":{"name":"h264","bitrate":2000000}}
-videostream.start {"lease_epoch":1,"stream_id":"ID ИЗ CREATE","rtp_port":5004}
-videostream.status {"stream_id":"ID ИЗ CREATE"}
+videostream.list {"offset":0,"limit":1}
+videostream.status {"name":"camera"}
+videostream.subscribe {"lease_epoch":1,"name":"camera","rtp_port":5004,"settings":{"max_fps":15}}
+videostream.update {"lease_epoch":1,"name":"camera","settings":{"max_fps":30}}
+videostream.unsubscribe {"name":"camera"}
+videostream.stop {"lease_epoch":1,"name":"camera"}
 ```
 
-Во второй сессии без захвата управления:
+settings плоский: width, height, fps, max_fps, bitrate; состав брать из controls.
+У прямого захвата дополнительно sensor_width/sensor_height/sensor_depth и нет max_fps.
+Bitrate — бит/с, меняется только при остановке. FPS/максимум FPS — числовые,
+не обязательно целые. max_fps не выше fps и фактической частоты захвата.
+Нужно отображать подтверждённые настройки; они общие для всех подписчиков.
+Настройки после restart stream-worker возвращаются к дефолтам производителя.
 
-```text
-videostream.list {"offset":0,"limit":4}
-videostream.attach {"stream_id":"ТОТ ЖЕ ID","rtp_port":5004}
-videostream.detach {"stream_id":"ТОТ ЖЕ ID"}
-```
+List items: name/title/state/available/reason/settings/controls/receivers/subscribed/producer.
+Controls: type, fixed или min/max/choices, live (отсутствие означает false).
+Status дополнительно возвращает run_id/ssrc/encoding_name/payload_type/clock_rate/mtu,
+negotiated_caps, actual_fps, counters, error, simulated. run_id/SSRC бывают null
+до первого запуска. available=false не означает отсутствие выхода из каталога.
+producer.requested/publishing и состояние кодера — разные вещи.
 
-## Что пока не обещать в интерфейсе
+События started/stopped/failed содержат name, не stream_id. События могут
+потеряться; status — способ сверки. datastream videostream.state содержит
+active_streams с name/transport/state/dependencies. OSD и остальные datastream
+не изменены. H.264 не является lossless-источником для точной LAB-калибровки.
 
-UnicamSequence RTP extension и новый MessagePack OSD не добавлены, exact_osd=false.
-Выход локализации пока размеченный BGR, не поток только примитивов. Нет нового
-выхода маски/remap, lossless потока для threshold tuner или JPEG quality control.
-Сжатое/уменьшенное изображение нельзя объявлять цветовым эталоном для thresholds.
-Нужно отдельно согласовать удаление resize 800x650 -> 640x520 до LAB и совпадение
-преобразования LAB на роботе и ПК; в этом патче GUI-преобразования не менялись.
+## Камера и безопасность
 
-## Проверки для GUI
+Панель camera.* по-прежнему отдельно управляет камерой+IMU и ISP. Подписка
+на camera/localisation не запускает их вычисления. Прямой stream-worker сам
+захватывает камеру без IMU и освобождает её после последнего получателя.
+Последний зритель ушёл — preview и кодер остановлены, автономная игра продолжается.
+На робота эту новую схему в данной итерации не отгружали: GUI и runtime нужно
+обновить согласованно.
 
-- Две сессии смотрят одну передачу; закрытие создателя не выключает второго.
-- Последний detach выключает encoder и диагностический выход, не вычислитель.
-- Смена владельца даёт управление уже созданными передачами.
-- Несколько docking-окон не создают несколько декодеров/attach одного стрима.
-- Конфликт direct-gst/runtime показан ошибкой, без автоматической остановки камеры.
-- max_fps меняется без скачка run_id/SSRC; stop/start меняет их.
-- Списки и controls проходят все страницы, в том числе недоступные источники.
-- Наблюдатель может смотреть, но не менять ISP или останавливать чужой просмотр.
-
-На стороне runtime это проверяют tests/test_videostream_contract.py и
-tests/test_gstreamer.py. Локальные тесты используют software encoder; новый
-контракт ещё нужно совместно проверить с GUI на CM4. Новый Buildroot-пакет
-не нужен: multiudpsink находится в уже используемом UDP plugin GStreamer.
-
-Состояние проверки на момент передачи: основной прогон до последних дополнений
-дал 651 passed. Последний дополнительный прогон дал 21 passed и одну ошибку
-в новом test_camera_control_catalog_with_hardware_ranges: тестовый объект
-открытой камеры не задаёт duration. Это незавершённая подготовка mock; реальный
-camera.prepare задаёт период. После просьбы пользователя завершить только
-документацию тесты и код больше не менялись. Финальный зелёный прогон пока
-не заявляется; проверка на CM4 с новым API также не выполнена.
+Общий контракт теперь в [OPERATOR_PROTOCOL.md](OPERATOR_PROTOCOL.md), без V1 в имени.
+Во внутренних iceoryx2-именах удалён суффикс /v1; при установке обновить и
+перезапустить весь runtime, не смешивать старые и новые воркеры.
