@@ -39,11 +39,12 @@ class BodyPower:
         self.adc = self.received_at = None
         self.error = reason
 
-    def state(self, now):
+    def state(self, now, voltage_scale=1.0):
         return {"valid": self.received_at is not None and 0 <= now - self.received_at < self.MAX_AGE_S,
                 "source_mono_ns": int(self.received_at * 1e9) if self.received_at is not None else None,
                 "timestamp_kind": "host_receive", "sequence": self.sequence,
                 # Zubr CS_VOLTAGE_CONV: 2702 ADC counts correspond to 10 V.
-                "voltage_v": self.adc * 10.0 / 2702.0 if self.adc is not None else None,
+                "voltage_v": self.adc * 10.0 / 2702.0 * voltage_scale if self.adc is not None else None,
+                "voltage_scale": voltage_scale,
                 "adc_raw": self.adc, "simulated": self.simulated,
                 "busy_reads": self.busy, "invalid_reads": self.invalid, "error": self.error}

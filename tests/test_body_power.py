@@ -56,6 +56,25 @@ def test_snapshot_conversion_cache_and_freshness(body):
     pack(envelope("sample", "data.sample", {"topic": "body.power", "data": sample}))
 
 
+def test_per_robot_calibration_changes_only_volts_and_persists(body, tmp_path):
+    body.hardware.body_power_adc = MagicMock(return_value=3660)
+    original = body.command("body.telemetry.read", {"power": True})["body.power"]
+    scale = 0.9072613518386974
+    params = Parameters(tmp_path)
+    params.set("power.voltage_scale", scale)
+    assert Parameters(tmp_path).values["power.voltage_scale"] == scale
+    body.command("params.apply", {"power.voltage_scale": scale})
+    calibrated = body.command("body.telemetry.read", {"power": True})["body.power"]
+    assert calibrated["voltage_v"] == pytest.approx(12.29, abs=0.001)
+    assert calibrated["voltage_scale"] == scale
+    for key in ("adc_raw", "source_mono_ns", "sequence", "valid"):
+        assert calibrated[key] == original[key]
+    body.hardware.body_power_adc.assert_called_once()
+    for invalid in (0, -1, 2, float("nan"), float("inf")):
+        with pytest.raises(Fault):
+            params.set("power.voltage_scale", invalid)
+
+
 def test_poll_is_opt_in_rate_limited_and_yields_to_motion(body):
     body.hardware.body_power_adc = MagicMock(return_value=3242)
     body.tick()
