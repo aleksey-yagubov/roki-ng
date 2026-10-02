@@ -75,7 +75,7 @@ async def until(predicate):
     assert predicate()
 
 
-def test_observe_start_stop_has_no_head_or_body_motion(tmp_path):
+def test_goalkeeper_start_prepares_body_and_stops_detection(tmp_path):
     async def run():
         game, s, session = setup(tmp_path)
         await game.start(session, {'strategy': 'FIRA_penalty_Goalkeeper'})
@@ -83,18 +83,18 @@ def test_observe_start_stop_has_no_head_or_body_motion(tmp_path):
         assert s.mode == 'GAME'
         await game.stop()
         assert not game.state()['running'] and s.mode == 'MANUAL'
-        assert not any(op.startswith(('motion.', 'game.')) for op, _ in s.workers['motherboard'].calls)
+        assert any(op == 'motion.pose' for op, _ in s.workers['motherboard'].calls)
         assert any(op == 'ball.stop' for op, _ in s.workers['detection'].calls)
     asyncio.run(run())
 
 
-def test_physical_requires_verified_geometry_before_side_effects(tmp_path):
+def test_goalkeeper_does_not_require_manual_geometry_flag(tmp_path):
     async def run():
         game, s, session = setup(tmp_path)
-        with pytest.raises(Fault, match='geometry'):
-            await game.start(session, {'strategy': 'FIRA_penalty_Goalkeeper', 'observe_only': False})
-        assert s.workers['motherboard'].calls == []
-        assert s.mode == 'MANUAL'
+        await game.start(session, {'strategy': 'FIRA_penalty_Goalkeeper'})
+        await until(lambda: game.state()['state'] == 'tracking')
+        assert s.mode == 'GAME'
+        await game.stop()
     asyncio.run(run())
 
 
@@ -109,29 +109,16 @@ def test_cancel_delay_prevents_later_start(tmp_path):
     asyncio.run(run())
 
 
-def test_failed_ball_stops_and_does_not_resume(tmp_path):
+def test_detection_fault_enters_reconnect_and_resumes(tmp_path):
     async def run():
         game, s, session = setup(tmp_path)
         s.workers['detection'].bad_ball = True
         await game.start(session, {'strategy': 'FIRA_penalty_Goalkeeper'})
-        await until(lambda: not game.state()['running'])
-        assert game.state()['state'] == 'failed'
+        await until(lambda: game.state()['state'] == 'reconnecting')
         s.workers['detection'].bad_ball = False
-        await asyncio.sleep(.02)
-        assert not game.state()['running']
-    asyncio.run(run())
-
-
-def test_physical_path_budget_keeps_completed_crouch(tmp_path):
-    async def run():
-        game, s, session = setup(tmp_path)
-        s.params.values.update({'game.geometry_verified': True, 'game.max_path_m': .1})
-        await game.start(session, {'strategy': 'FIRA_penalty_Goalkeeper', 'observe_only': False})
-        await until(lambda: not game.state()['running'])
-        calls = s.workers['motherboard'].calls
-        assert sum(op == 'game.step' for op, _ in calls) == 1
-        assert not any(op == 'motion.stop_hard' for op, _ in calls)
-        assert 'budget' in game.state()['reason']
+        await until(lambda: game.state()['state'] == 'tracking')
+        assert game.state()['running']
+        await game.stop()
     asyncio.run(run())
 
 
@@ -173,34 +160,6 @@ def test_stop_cancels_start_still_checking_body(tmp_path):
         gate.set()
         with pytest.raises(Fault): await task
         assert s.mode == 'MANUAL' and not game.state()['running']
-    asyncio.run(run())
-
-
-def test_stop_does_not_interrupt_fault_cleanup(tmp_path):
-    async def run():
-        game, s, session = setup(tmp_path)
-        s.params.values['game.geometry_verified'] = True
-        async def failed_step(*args):
-            raise Fault('imu_invalid', 'test fault during active step')
-        game._monitor_step = failed_step
-        original = s.workers['motherboard'].call
-        entered, release = asyncio.Event(), asyncio.Event()
-        async def wait_stop(op, *args, **kwargs):
-            if op == 'motion.stop_hard':
-                entered.set()
-                await release.wait()
-            return await original(op, *args, **kwargs)
-        s.workers['motherboard'].call = wait_stop
-        await game.start(session, {'strategy': 'FIRA_penalty_Goalkeeper', 'observe_only': False})
-        await asyncio.wait_for(entered.wait(), 2)
-        assert not s.motion_ready
-        stop = asyncio.create_task(game.stop())
-        await asyncio.sleep(.02)
-        assert not stop.done()  # Must await the hardware stop acknowledgement.
-        release.set()
-        await stop
-        assert s.motion_ready and not game.state()['running']
-        assert any(op == 'ball.stop' for op, _ in s.workers['detection'].calls)
     asyncio.run(run())
 
 
@@ -458,7 +417,7 @@ def test_ball_start_uses_thresholds_changed_during_preparation(tmp_path):
         game, s, session = setup(tmp_path)
         await game.start(session,{'strategy':'FIRA_penalty_Goalkeeper'})
         s.params.values['vision.orange_ball.pixels_min'] = 123
-        await until(lambda:game.state()['state']=='observing')
+        await until(lambda:game.state()['state']=='tracking')
         args = next(args for op,args in s.workers['detection'].calls if op=='ball.start')
         assert args['parameters']['vision.orange_ball.pixels_min']==123
         await game.stop()

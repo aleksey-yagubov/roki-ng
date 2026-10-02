@@ -101,7 +101,10 @@ class Goalkeeper:
             await asyncio.sleep(.25)
         return False
     async def _ball(self):
-        obs=await self._call('detection','ball.status');result=obs.get('result') or {};seq=result.get('frame_sequence',-1)
+        obs=await self._call('detection','ball.status')
+        if obs.get('error'):
+            raise Fault('detection_fault', str(obs['error']))
+        result=obs.get('result') or {};seq=result.get('frame_sequence',-1)
         if result.get('valid') and type(seq) is int and seq>self.last_seen_sequence:self.last_seen_sequence=seq
         self.info['ball']=result or None;return obs
 
