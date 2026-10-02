@@ -17,9 +17,8 @@ async def check(args):
     gi.require_version("GstApp", "1.0")
     from gi.repository import Gst
     Gst.init(None)
-    jpeg = args.codec == "jpeg"
-    encoding, pt = ("JPEG", 26) if jpeg else ("H264", 96)
-    decode = "rtpjpegdepay ! jpegparse ! jpegdec" if jpeg else "rtph264depay ! h264parse ! avdec_h264"
+    encoding, pt = "H264", 96
+    decode = "rtph264depay ! h264parse ! avdec_h264"
     pipeline = Gst.parse_launch(
         f'udpsrc name=udp port=0 caps="application/x-rtp,media=video,encoding-name={encoding},payload={pt},clock-rate=90000" '
         f'! {decode} ! appsink name=frames sync=false max-buffers=2 drop=true')
@@ -37,13 +36,11 @@ async def check(args):
         owns_capture = True
         if args.detection:
             await client.request("detection.start", {"profile": "orange_ball"})
-        info = await client.request("videostream.create", {
-            "source": "runtime", "codec": {"name": args.codec},
-            "output": {"width": 800, "height": 648 if jpeg else 650, "fps": 30}})
-        ident = info["stream_id"]
+        ident = "camera"
         sink = pipeline.get_by_name("frames")
         for cycle in range(2):
-            await client.request("videostream.start", {"stream_id": ident, "rtp_port":port})
+            await client.request("videostream.subscribe", {"name": ident, "rtp_port":port,
+                                   "settings": {"fps":30,"max_fps":30}})
             count = 0
             first_received = None
             deadline = time.monotonic() + 15 + args.frames / 15
@@ -54,17 +51,17 @@ async def check(args):
                         first_received = time.monotonic()
                     caps = sample.get_caps().get_structure(0)
                     assert caps.get_value("width") == 800
-                    assert caps.get_value("height") == (648 if jpeg else 650)
+                    assert caps.get_value("height") == 650
                     count += 1
                 else:
                     await asyncio.sleep(0.01)
-            state = await client.request("videostream.status", {"stream_id": ident})
+            state = await client.request("videostream.status", {"name": ident})
             assert count == args.frames and state["state"] == "running", (count, state)
             elapsed = time.monotonic() - first_received
             assert elapsed < args.frames / 10, f"Only {(count - 1) / elapsed:.1f} decoded FPS"
             camera = await client.request("camera.status")
             assert camera["running"] and camera["imu_sync"]["state"] == "synced", camera
-            print("DECODED", args.codec, cycle, count, "fps", round((count - 1) / elapsed, 1),
+            print("DECODED", "h264", cycle, count, "fps", round((count - 1) / elapsed, 1),
                   state.get("negotiated_caps"), flush=True)
             if args.detection:
                 detector = await client.request("detection.status")
@@ -72,7 +69,7 @@ async def check(args):
                 assert detector["result"]["frame_sequence"] <= camera["sequence"] + 10
                 print("DETECTION", detector, flush=True)
             if cycle == 0:
-                await client.request("videostream.stop", {"stream_id": ident})
+                await client.request("videostream.stop", {"name": ident})
                 await asyncio.sleep(0.3)
                 after = await client.request("camera.status")
                 assert after["sequence"] > camera["sequence"] and after["imu_sync"]["state"] == "synced"
@@ -80,14 +77,14 @@ async def check(args):
                     pass
         await client.request("camera.stop")
         owns_capture = False
-        assert (await client.request("videostream.status", {"stream_id": ident}))["state"] == "stopped"
+        assert (await client.request("videostream.status", {"name": ident}))["state"] == "stopped"
         if args.detection:
             assert not (await client.request("detection.status"))["running"]
         print("STOPPED: runtime video followed camera stop", flush=True)
     finally:
         try:
             if ident:
-                await client.request("videostream.destroy", {"stream_id": ident})
+                await client.request("videostream.unsubscribe", {"name": ident})
         finally:
             try:
                 if owns_capture:
@@ -101,7 +98,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--robot", required=True)
     parser.add_argument("--port", type=int, default=8093)
-    parser.add_argument("--codec", choices=("jpeg", "h264"), default="jpeg")
     parser.add_argument("--detection", action="store_true")
     parser.add_argument("--frames", type=int, default=30)
     args = parser.parse_args()

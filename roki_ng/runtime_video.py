@@ -6,8 +6,9 @@ import threading
 
 
 class RuntimeVideo:
-    def __init__(self, appsrc, gst, fps, topic=FRAME_TOPIC):
+    def __init__(self, appsrc, gst, fps, topic=FRAME_TOPIC, geometry=(800, 650, 2400)):
         self.appsrc, self.gst = appsrc, gst
+        self.geometry = geometry
         self.period_ns = round(1e9 / fps)
         self.rate_lock = threading.Lock()
         self.last_stamp = None
@@ -31,8 +32,8 @@ class RuntimeVideo:
 
     def push(self, view):
         seq, stamp, width, height, stride = FRAME_HEADER.unpack_from(view)
-        if (width, height, stride) != (800, 650, 2400) or len(view) != FRAME_HEADER.size + stride * height:
-            raise ValueError("Expected packed 800x650 BGR frame")
+        if (width, height, stride) != self.geometry or len(view) != FRAME_HEADER.size + stride * height:
+            raise ValueError("Frame does not match producer-declared BGR geometry")
         if self.sequence is not None and seq <= self.sequence:
             raise ValueError("Camera sequence restarted; stop and restart runtime video")
         self.sequence = seq

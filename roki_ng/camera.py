@@ -173,6 +173,16 @@ class Camera:
             return self.state()
         raise Fault("not_supported", op)
 
+    def video_source(self):
+        from .dataplane import FRAME_TOPIC
+        from .video_sources import frame_source
+        state = self.state()
+        running = bool(state.get('running'))
+        return frame_source('Камера', FRAME_TOPIC, 800, 650,
+                            available=running, reason=None if running else 'camera_stopped',
+                            publishing=running and bool(state.get('frames')),
+                            fps=min(60, 1000000 / getattr(self, 'duration', 16667)))
+
     def _prepare(self):
         import libcamera as lc
         import numpy as np

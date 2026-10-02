@@ -24,7 +24,7 @@ class Client:
     async def connect(self):
         self.tasks.append(asyncio.create_task(self._read()))
         welcome = await self._exchange("hello", "hello", {
-            "versions": [1], "client_name": "roki-reference-client", "client_instance": uuid.uuid4().hex})
+            "client_name": "roki-reference-client", "client_instance": uuid.uuid4().hex})
         self.session, self.token = welcome["session"], welcome["token"]
         self.tasks.append(asyncio.create_task(self._heartbeat()))
         return welcome["body"]
@@ -37,8 +37,6 @@ class Client:
             try:
                 msg = unpack(raw)
             except Fault:
-                continue
-            if msg.get("v") != 1:
                 continue
             if self.session and (msg.get("session") != self.session or msg.get("token") != self.token):
                 continue

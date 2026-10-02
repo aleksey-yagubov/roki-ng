@@ -122,7 +122,7 @@ def test_supervisor_orders_capture_and_excludes_gst(tmp_path):
         await server.dispatch(session,"camera.stop",{"lease_epoch":1})
         assert calls == ["camera.stop","imu.stop"]
         assert server.capture_session is None
-        server.workers["stream"].call.return_value = {"active_streams":[{"stream_id":"test","source":"direct-gst"}]}
+        server.workers["stream"].call.return_value = {"active_streams":[{"name":"stream","transport":"libcamera"}]}
         with pytest.raises(Fault, match="direct-gst"):
             await server.dispatch(session,"camera.start",{"lease_epoch":1})
     asyncio.run(run())
@@ -272,7 +272,7 @@ def test_start_existing_synchronized_camera_does_not_interrupt_video(tmp_path):
                'requested_controls':{'exposure_us':8000,'gain':1.0},
                'imu_sync':{'state':'synced'}}
         server.workers['camera'].call=AsyncMock(return_value=state)
-        server.workers['stream'].call.return_value={'active_streams':[{'source':'runtime','stream_id':'main'}]}
+        server.workers['stream'].call.return_value={'active_streams':[{'transport':'frames','name':'camera'}]}
         assert await server.dispatch(session,'camera.start',{'lease_epoch':1})==state
         assert [c.args[0] for c in server.workers['camera'].call.call_args_list]==['camera.status']
         assert not calls
