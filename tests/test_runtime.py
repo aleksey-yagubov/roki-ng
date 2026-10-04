@@ -170,7 +170,7 @@ def test_worker_fault_keeps_control_endpoint_alive(tmp_path):
             assert server.workers["stream"].process.pid != old_pid
             assert (await client.request("system.status"))["state"] == "IDLE"
             await client.request("mode.set", {"mode": "MANUAL"})
-            assert (await client.request("videostream.list"))["total"] == 3
+            assert (await client.request("videostream.status", {'name': 'stream'}))['available']
             await worker.close()
         finally:
             await client.close()

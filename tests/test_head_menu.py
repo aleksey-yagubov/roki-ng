@@ -339,3 +339,63 @@ def test_takeover_with_failed_stop_grants_lease_but_blocks_motion(tmp_path):
         reply = await server.dispatch(session, "control.acquire", {"force": True})
         assert reply["motion_ready"] and reply["stop_confirmed"]
     asyncio.run(run())
+
+
+def test_game_back_requires_single_long_hold_and_rearms_on_release():
+    async def run():
+        h = Harness()
+        h.menu.game_active, h.menu.job = True, 'game1'
+        buttons = HeadButtons(h.menu, lambda *a: None)
+        def back(value): buttons.event(SimpleNamespace(type=1, code=184, value=value))
+        back(1)
+        await asyncio.sleep(.01)
+        back(0)
+        assert not h.calls and not h.menu.cancel_requested
+        back(1)
+        await asyncio.sleep(.75)
+        for _ in range(5):
+            back(2)
+            back(1)
+        await asyncio.sleep(.05)
+        assert [op for op, _ in h.calls] == ['game.pickup']
+        back(0)
+        back(1)
+        await asyncio.sleep(.75)
+        assert [op for op, _ in h.calls] == ['game.pickup', 'game.pickup']
+        buttons.close()
+    asyncio.run(run())
+
+
+def test_pickup_menu_is_rebuilt_for_every_game_and_waits_for_confirmation():
+    async def run():
+        h = Harness()
+        h.menu.game_active, h.menu.job = True, 'game1'
+        status = dict(job_id='game1', running=True, pickup=True,
+                      pickup_ready=False, pickup_confirmation_required=True)
+        await h.menu.game_finished(status)
+        assert h.menu.selected.op == 'game.pickup'
+        assert h.menu.selected.args == {'confirm': True}
+        await h.menu._start(h.menu.selected)
+        assert not h.menu.pickup_mode
+        await h.menu.game_finished(status | {'pickup_ready': True, 'pickup_confirmation_required': False})
+        assert h.menu.pickup_mode and h.menu.selected.label == 'Goalkeeper'
+        h.menu.taken_over()
+        h.menu.game_active, h.menu.job = True, 'game2'
+        await h.menu.game_finished(status | {'job_id': 'game2', 'pickup_ready': True, 'pickup_confirmation_required': False})
+        assert h.menu.pickup_mode and h.menu.selected.label == 'Goalkeeper'
+        h.menu.press('right')
+        assert h.menu.selected.label == 'Forward'
+    asyncio.run(run())
+
+
+def test_head_menu_follows_gui_game_and_does_not_treat_it_as_manual_test():
+    async def run():
+        h = Harness()
+        await h.menu.observe_game(dict(running=True, job_id='gui-game', role='forward'))
+        assert h.menu.game_active and h.menu.job == 'gui-game'
+        h.menu.press('back')
+        assert not h.calls and not h.menu.cancel_requested
+        h.menu.hold('back')
+        await h.menu.action
+        assert h.calls == [('game.pickup', {})]
+    asyncio.run(run())

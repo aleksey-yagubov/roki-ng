@@ -8,7 +8,7 @@ import copy
 
 from . import field_config
 
-from .wire import Fault, number, boolean
+from .wire import Fault, number, boolean, choice
 
 # Starting colour ranges, not the calibration of any particular robot/field.
 COLOUR_DEFAULTS = {
@@ -21,19 +21,23 @@ COLOUR_DEFAULTS = {
 }
 
 SCHEMA = {
+    'game.simple_football.entry_forward_mm': ('float', 200., 0., 500., 'next_game', 'Simple football left/right entry distance, millimetres'),
+    'game.simple_football.kickoff_side': ('str', 'left', None, None, 'next_game', 'Simple football kickoff side: left or right'),
+    'game.camera_reference_tilt': ('int', -1500, -2600, 950, 'next_game', 'Head tilt at which camera height/forward offset were measured in base_stand'),
+    'game.camera_forward_m': ('float', 0., -.2, .3, 'next_game', 'Optical centre forward offset from body origin at reference tilt; measure for robot'),
+    'game.use_visual_localisation': ('bool', True, None, None, 'next_game', 'Use stationary camera field corrections during game; false keeps IMU/odometry and ball detection. Applies on next game start.'),
+    "motion.kick_type": ("str", "software", None, None, "next_job", "Тип удара: software — Python; controller — оригинальный roki2met, слот 31. Применяется к следующему ручному/игровому удару; менять при остановленной игре."),
     "power.voltage_scale": ("float", 1.0, 0.5, 1.5, "next_job", "Калибровочный множитель напряжения аккумулятора: voltage_v = ADC * 10 / 2702 * множитель. Больше: выше показание. Поправка конкретной платы по мультиметру, не процент заряда. Изменять между движениями; применяется к следующему snapshot."),
-    'game.forward.kick_off_ride': ('bool', True, None, None, 'next_game', 'Run the central forward kickoff manoeuvre on the next immediate game start'),
-    'game.camera_height_m': ('float', .4068, .2, .8, 'next_game', 'Measured optical centre height in goalkeeper posture, metres'),
-    'game.head_tilt': ('int', -1500, -2600, 950, 'next_game', 'Fixed FIRA head tilt; head pan is centered'),
+    'game.forward.kick_off_ride': ('bool', True, None, None, 'next_game', 'Enable immediate center kickoff for forward or simple_football; delayed and side entries skip it'),
+    'game.camera_height_m': ('float', .4068, .2, .8, 'next_game', 'Measured optical centre height in base_stand observation posture, metres'),
+    'game.head_tilt': ('int', -1500, -2600, 950, 'next_game', 'FIRA head tilt during centred observation and lateral search'),
+    'game.ball_diameter_m': ('float', .09, .02, .25, 'next_game', 'Measured ball diameter (90 mm), metres; centre-ray projection subtracts its radius'),
+    'game.neck_height_m': ('float', .03676, .001, .15, 'next_game', 'Original HEIGHT_OF_NECK (36.76 mm), metres'),
+    'game.kick_approach_mm': ('float', 60., 20., 300., 'next_game', 'Original KICK_ADJUSTMENT_DISTANCE_1: verify-pass reference distance, millimetres'),
+    'game.kick_distance_mm': ('float', 100., 20., 300., 'next_game', 'Original KICK_ADJUSTMENT_DISTANCE_2: fine-adjustment forward threshold, millimetres; a closer aligned ball is kicked, not moved backwards'),
+    'game.kick_offset_mm': ('float', 52., 10., 150., 'next_game', 'Original KICK_OFFSET_OF_BALL, lateral millimetres'),
     'game.ball_max_distance_m': ('float', 3., .3, 4., 'next_game', 'Maximum usable ball distance'),
-    'game.deadband_m': ('float', .1, .05, .3, 'next_game', 'Lateral ball deadband, metres'),
-    'game.max_heading_error_rad': ('float', .2, .05, .35, 'next_game', 'Stop when yaw drifts from initial heading'),
-    'game.ball_loss_timeout_s': ('float', 3., .5, 10., 'next_game', 'Stop physical game when no valid ball is available'),
-    'game.side_step_mm': ('float', 10., 1., 10., 'next_game', 'Autonomous lateral gait amplitude, independent of manual speed'),
-    'game.step_cycles': ('int', 1, 1, 2, 'next_game', 'Finite cycles per goalkeeper correction'),
-    'game.step_budget_m': ('float', .1, .1, .2, 'next_game', 'Conservative path reservation per correction; not measured odometry'),
-    'game.max_path_m': ('float', .3, .1, 1., 'next_game', 'Total reserved path before explicit restart'),
-    'game.max_excursion_m': ('float', .3, .1, .5, 'next_game', 'Maximum signed reserved lateral excursion'),
+    'game.ball_loss_timeout_s': ('float', 3., .5, 10., 'next_game', 'Finish current tracking step when no fresh ball is available for this interval'),
     'camera.exposure_us': ('int',8000,1,100000,'next_request','Manual exposure in microseconds; must fit frame period'),
     'camera.analogue_gain': ('float',1.,1.,16.,'next_request','Manual analogue gain'),
     'camera.ae_enabled': ('bool',False,None,None,'next_request','Automatic exposure; manual values retained when enabled'),
@@ -53,7 +57,6 @@ SCHEMA = {
         f"Manual white balance {colour} gain; calibrate for venue lighting")
        for colour in ("red", "blue")},
     "stabilization.diagnostics_enabled": ("bool", False, None, None, "next_job", "Тестовая диагностика ID7: опрос позиций 5 Гц и лог раз в секунду. Сравнение целей и измерений, без изменения движений. Свежесть отдельной сервы неизвестна; расхождение не доказывает неисправность."),
-    "body_imu.poll_enabled": ("bool", False, None, None, "next_job", "Опрос IMU тела без регулятора и подписчиков. По умолчанию выключен; подписка body.imu или включённый регулятор сами включают опрос. Цель 50 Гц, Busy пропускается."),
     "stabilization.enabled": ("bool", False, None, None, "next_job", "Экспериментальное удержание pitch неподвижного приседа через ID7 обеих ног. Выключено по умолчанию. В движении поправка заморожена; выключение не обнуляет её рывком."),
     "stabilization.pitch_target_deg": ("float", 0.0, -5, 5, "next_job", "Целевой наклон корпуса, градусы: плюс вперёд, минус назад. Не оценка центра масс и не гарантия равновесия."),
     "stabilization.pitch_kp": ("float", 0.2, 0, 1, "next_job", "Коэффициент P: больше даёт сильнее поправку бедра на ошибку pitch. Без интегратора. Сначала проверить знак на поддерживаемом роботе."),
@@ -134,10 +137,16 @@ class Parameters:
         result=dict(key=key, type=kind, default=copy.deepcopy(default), min=low, max=high,
                     apply=apply, description=description)
         if key in field_config.FIELDS:result['fields']=field_config.FIELDS[key]
+        if key == "motion.kick_type":
+            result['choices'] = ['software', 'controller']
+        if key == 'game.simple_football.kickoff_side':
+            result['choices'] = ['left', 'right']
         return result
 
     def validate(self, key, value):
         meta = self.describe(key)
+        if 'choices' in meta:
+            return choice({key: value}, key, None, meta['choices'])
         if key in field_config.FIELDS:return field_config.validate(key,value)
         if meta["type"] == "bool":
             return boolean({key: value}, key)

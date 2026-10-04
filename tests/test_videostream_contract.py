@@ -14,6 +14,30 @@ from roki_ng.supervisor import Supervisor, Session
 from roki_ng.wire import Fault, UDP_LIMIT, envelope, pack
 
 
+@pytest.mark.parametrize('name', ['detection', 'localisation'])
+def test_processed_video_availability_uses_real_camera_status(tmp_path, name):
+    async def run():
+        server = Supervisor({'state_dir': str(tmp_path)})
+        camera = Camera({'simulate': True}, lambda *a: None, lambda *a: None)
+        async def camera_call(op, body=None, **kwargs):
+            return camera.command(op, body or {})
+        peer = NS(alive=True, call=camera_call)
+        server.workers = {'camera': peer, 'stream': NS(call=AsyncMock(return_value={
+            'name': name, 'state': 'stopped'}))}
+        server.video_sources[name] = frame_source('Processed image', 'test/image', 800, 650,
+                                                  available=True, dependencies=('camera',))
+        session = NS(id=1)
+        camera.running = True
+        status = await server._video_status(name, session)
+        assert status['available'] and status['reason'] is None
+        camera.running = False
+        status = await server._video_status(name, session)
+        assert not status['available'] and status['reason'] == 'dependency_not_ready'
+        peer.alive = False
+        assert not (await server._video_status(name, session))['available']
+    asyncio.run(run())
+
+
 def test_multiclient_protocol_over_udp(tmp_path):
     async def run():
         server = Supervisor({"simulate": True, "state_dir": str(tmp_path), "host": "127.0.0.1", "port": 0})
@@ -24,12 +48,18 @@ def test_multiclient_protocol_over_udp(tmp_path):
             await owner.connect()
             await viewer.connect()
             await owner.request("control.acquire")
-            sources = [(await viewer.request("videostream.list", {"offset": i}))["items"][0] for i in range(3)]
+            sources = []
+            offset = 0
+            while offset is not None:
+                page = await viewer.request('videostream.list', {'offset': offset})
+                sources.extend(page['items'])
+                offset = page['next_offset']
             by_name = {s["name"]: s for s in sources}
-            assert set(by_name) == {"stream", "camera", "localisation"}
+            assert set(by_name) == {"stream", "camera", "localisation", "detection"}
             assert by_name["stream"]["available"]
             assert by_name["camera"]["reason"] == "camera_stopped"
             assert not by_name["localisation"]["available"]
+            assert not by_name['detection']['available']
             assert by_name["camera"]["controls"]["width"]["fixed"]
             assert by_name["camera"]["controls"]["max_fps"]["live"]
             assert not (await viewer.request("camera.status"))["prepared"]

@@ -12,7 +12,7 @@ from .ipc import WorkerPeer
 from .parameters import Parameters, SCHEMA, COLOUR_DEFAULTS, validate_colour_ranges
 from .calibration import ROTATION_KEYS
 from .platform import Bootstrap
-from .wire import Fault, UDP_LIMIT, envelope, number, boolean, pack, page, udp_socket, unpack
+from .wire import Fault, UDP_LIMIT, envelope, number, boolean, choice, pack, page, udp_socket, unpack
 
 OPS = (
     "game.start", "game.stop", "game.status", "game.pause", "game.resume", "game.pickup",
@@ -85,6 +85,7 @@ class Supervisor:
         self.tasks = set()
         self.sock = None
         self.bootstrap = None
+        self.motherboard_reset_task = None
         self.closing = False
         self.control_lock = asyncio.Lock()
         self.parameter_lock = asyncio.Lock()
@@ -104,6 +105,7 @@ class Supervisor:
         self.local_session = Session(secrets.randbits(63) + 1, 0, (), "head-buttons")
         from .game import Goalkeeper
         self.game = Goalkeeper(self)
+        self.football_diagnostic = False
 
     def spawn(self, coroutine):
         task = asyncio.create_task(coroutine)
@@ -176,12 +178,42 @@ class Supervisor:
         self.voice.say("Ready")
 
     async def _head_command(self, op, body):
+        if op == 'menu.own_goal':
+            colour = choice(body, 'colour', None, ('yellow', 'blue'))
+            matches = [i for i in (0, 1) if self.params.values[f'field.goal.{i}']['colour'] == colour]
+            if len(matches) != 1:
+                raise Fault('invalid_argument', 'Goal colour must identify exactly one mapped goal')
+            if self.game.info['running'] and not self.game.info.get('pickup_ready'):
+                raise Fault('busy', 'Stop game or complete Pick up before selecting goal')
+            # Menu navigation and its non-motion selections must never touch
+            # the body control lease.  A GUI owner remains authoritative; the
+            # head may not silently acquire or interrupt its controls merely
+            # because the operator browsed the goal-colour item.
+            if self.owner not in (None, self.local_session.id):
+                raise Fault('busy', 'Control is owned by another operator')
+            await self._set_parameters({'match.own_goal': matches[0]})
+            return {'colour': colour, 'own_goal': matches[0]}
+        if op == 'game.pickup':
+            # Trusted physical operator input has priority over the GUI lease.
+            # Network game.pickup still goes through require_control.
+            return await self.game.pickup(body)
+        if op == 'game.stop':
+            result = await self.game.stop()
+            await self._head_release()
+            return result
         if op in ("test.start", "game.start"):
-            await self.dispatch(self.local_session, "control.acquire", {})
+            force = (op == 'game.start' and self.game.info.get('pickup_ready')
+                     and self.owner not in (None, self.local_session.id))
+            await self.dispatch(self.local_session, "control.acquire", {'force': bool(force)})
             try:
-                await self.dispatch(self.local_session, "mode.set", {
-                    "mode": "MANUAL", "lease_epoch": self.lease_epoch})
-                return await self.dispatch(self.local_session, op, body | {"lease_epoch": self.lease_epoch})
+                if not (op == 'game.start' and self.mode == 'GAME' and self.game.pickup_requested):
+                    await self.dispatch(self.local_session, "mode.set", {
+                        "mode": "MANUAL", "lease_epoch": self.lease_epoch})
+                result = await self.dispatch(self.local_session, op, body | {"lease_epoch": self.lease_epoch})
+                if op == 'game.start':
+                    # Autonomy continues without keeping the GUI control lease.
+                    await self._head_release()
+                return result
             except Exception:
                 await self._head_release()
                 raise
@@ -191,6 +223,21 @@ class Supervisor:
         await self._release(self.local_session)
 
     def worker_event(self, role, op, body):
+        if role == 'motherboard' and self.game.simple:
+            if op == 'body.telemetry':
+                self.game.simple.check_goal_memory(body.get('body.imu', {}))
+            elif op in ('worker.fault', 'motherboard.reset_required', 'job.failed', 'job.cancelled') or (
+                    op == 'body.connection' and not body.get('body_connected')):
+                self.game.simple.forget_goal(op)
+        if role == 'motherboard' and op in ('job.progress', 'body.connection') and self.football_diagnostic:
+            if op == 'job.progress' or body.get('pose') != 'base_stand' or not body.get('body_connected'):
+                self.football_diagnostic = False
+                self.spawn(self.workers['detection'].call('football.pose', {'active': False,
+                           'note': 'Body moved: restart football diagnostics in base_stand'}))
+        if role == 'motherboard' and op == 'motherboard.reset_required':
+            if not self.closing and (self.motherboard_reset_task is None or self.motherboard_reset_task.done()):
+                self.motherboard_reset_task = self.spawn(self._reset_motherboard())
+            return
         if not self.closing and ((role == 'stream' and op in ('videostream.failed', 'videostream.stopped', 'worker.fault'))
                                  or (role in self.video_sources and op in (f'{role}.fault', 'worker.fault'))):
             self.spawn(self._video_fault(role, op))
@@ -227,6 +274,10 @@ class Supervisor:
                 owner = self.local_session if self.owner == self.local_session.id else self.sessions.get(self.owner)
                 if owner:
                     self.spawn(self._release(owner))
+        if role == 'motherboard' and op.startswith('job.') and body.get('operation', '').startswith('game.'):
+            # Full confirmed segments are local IPC data for odometry. A long
+            # original manoeuvre must not overflow operator event datagrams.
+            body = {key: value for key, value in body.items() if key != 'segments'}
         for session in list(self.sessions.values()):
             if op.startswith("job.") and session.id != self.owner:
                 continue
@@ -379,7 +430,13 @@ class Supervisor:
 
     async def _take_control(self, session):
         """Called under control_lock. Revoke first, then reset via urgent IPC."""
-        await self.game.stop('control_takeover', hard=True)
+        try:
+            await self.game.stop('control_takeover', hard=True)
+        except Fault as exc:
+            # A failed autonomous stop must not strand ownership with a lost
+            # operator. Grant the new lease below, but keep motion blocked until
+            # the independent takeover reset is acknowledged.
+            self.log('supervisor', 'ERROR', f'Game stop before takeover unconfirmed: {exc}')
         previous = self.owner
         old = self.local_session if previous == self.local_session.id else self.sessions.get(previous)
         self.owner = session.id
@@ -397,7 +454,11 @@ class Supervisor:
         try:
             if not worker or not worker.alive:
                 raise Fault("worker_unavailable", "motherboard")
-            await worker.call("control.takeover", urgent=True)
+            result = await worker.call("control.takeover", urgent=True)
+            if result.get('stop_confirmed') is not True:
+                raise Fault('stop_unconfirmed', 'Takeover queue reset not confirmed')
+            self.game.queue_stopped()
+            await self.game.stop('control_takeover')
             self.motion_ready = True
         except Fault as exc:
             error = exc.as_dict()
@@ -445,13 +506,15 @@ class Supervisor:
             if op == "game.resume":
                 return await self.game.resume()
             if op == "game.pickup":
-                return await self.game.pickup()
+                return await self.game.pickup(body)
             generation = self.game.generation
             async with self.parameter_lock:
                 self.require_control(session, body)
                 if generation != self.game.generation:
                     raise Fault('cancelled', 'Game start discarded at stop barrier')
-                return await self.game.start(session, body)
+                result = await self.game.start(session, body)
+                self.football_diagnostic = False
+                return result
         if op in ('motion.stop_hard', 'motion.stop_graceful') or (op == 'mode.set' and body.get('mode') == 'IDLE'):
             self.require_control(session, body)
             await self.game.stop('operator_stop', hard=op == 'motion.stop_hard')
@@ -472,9 +535,9 @@ class Supervisor:
                     "body": ["software_slots", "walk", "jump", "kick", "head", "tests"],
                     "video_codec": "h264", "data_topics": list(TOPICS),
                     "capture_backends": ["libcamera-iceoryx2"],
-                    "detectors": ["colour_blobs"],
-                    "localisation": {"mode": "diagnostic_only", "motion_pose": False},
-                    "game": {"strategies": ["FIRA_penalty_Goalkeeper", "forward"], "entries": ["center", "left", "right"]},
+                    "detectors": ["colour_blobs", "ball"],
+                    "localisation": {"mode": "stationary_correction", "motion_pose": True},
+                    "game": {"strategies": ["FIRA_penalty_Goalkeeper", "forward", "ball_kick_test", "simple_football", "danger_football", "simple_goalkeeper"], "entries": ["center", "left", "right"]},
                     "future": ["osd", "servo-parameters"],
                     "hardware_slots": False, "simulated": bool(self.config.get("simulate"))}
         if op == "system.status":
@@ -487,7 +550,7 @@ class Supervisor:
             async with self.control_lock:
                 if session.closed:
                     raise Fault("session_expired", "Session closed")
-                if force:
+                if force or (self.owner == self.local_session.id and session is not self.local_session):
                     return await self._take_control(session)
                 body_worker = self.workers.get("motherboard")
                 if self.mode == "BOOTSTRAP" or not body_worker or not body_worker.alive:
@@ -599,6 +662,10 @@ class Supervisor:
             expected = set(job.get("manual_parameters", ()))
             if not expected or not isinstance(values, dict) or set(values) != expected:
                 raise Fault("invalid_argument", "Provide exactly the job's manual_parameters")
+            # Spot-run measures residual drift with the corrections captured at
+            # test start. Re-submitting this measurement must be idempotent.
+            values = {key: self.params.validate(key, value) + job.get("measurement_baseline", {}).get(key, 0)
+                      for key, value in values.items()}
             return {"job_id": job["job_id"], "saved": await self._set_parameters(values)}
         if op == "mode.set":
             if body.get("mode") not in ("IDLE", "MANUAL"):
@@ -644,6 +711,7 @@ class Supervisor:
         if op in ("localisation.start", "localisation.stop"):
             async with self.capture_lock:
                 self.require_control(session, body)
+                self.require_game_idle()
                 if op == "localisation.stop":
                     await self.workers["stream"].call("videostream.stop_source", {"name": "localisation"})
                     return await self.workers["localisation"].call(op)
@@ -659,18 +727,42 @@ class Supervisor:
                     "parameters": dict(self.params.values)}, timeout=5)
         if op == "detection.list":
             return {"detector": "colour_blobs", "profiles": list(COLOUR_DEFAULTS),
-                    "max_blobs": 4, "coordinates": "image_pixels", "classifies_ball": False}
+                    "max_blobs": 4, "coordinates": "image_pixels", "classifies_ball": False,
+                    "modes": ['colour', 'ball', 'football'], "video_source": 'detection'}
         if op == "detection.status":
             return await self.workers["detection"].call(op)
         if op in ("detection.start", "detection.stop"):
             async with self.capture_lock:
                 self.require_control(session, body)
                 if op == "detection.start":
+                    if set(body)-{'mode', 'profile', 'lease_epoch'} or body.get('mode', 'colour') not in ('colour', 'ball', 'football'):
+                        raise Fault('invalid_argument', 'Expected mode=colour, ball or football and optional colour profile')
                     if self.mode not in ("MANUAL", "GAME"):
                         raise Fault("invalid_state", "Select MANUAL or start game")
-                    if not (await self.workers["camera"].call("camera.status"))["running"]:
+                    camera = await self.workers["camera"].call("camera.status")
+                    self.require_control(session, body)
+                    if self.mode not in ('MANUAL', 'GAME'):
+                        raise Fault('invalid_state', 'Select MANUAL or start game')
+                    if not camera['running']:
                         raise Fault("not_ready", "Start runtime camera before detection")
-                return await self.workers["detection"].call(op, body)
+                    if body.get('mode') in ('ball', 'football'):
+                        self.require_game_idle()
+                        sync = camera.get('imu_sync', {})
+                        if sync.get('state') != 'synced':
+                            raise Fault('not_ready', 'A synchronized camera is required for ball diagnostics')
+                        body = body | {'unicam_minus_stm': sync['unicam_minus_stm']}
+                        if body.get('mode') == 'football':
+                            stance = await self.workers['motherboard'].call('state')
+                            if stance.get('pose') != 'base_stand' or stance.get('active_job') or not stance.get('body_connected'):
+                                raise Fault('not_ready', 'Football diagnostics require completed base_stand; no motion is started')
+                            body = body | {'pose': dict(active=True, pose_id=time.monotonic_ns(),
+                                      pan=stance['head']['pan'], tilt=stance['head']['tilt'], after=time.monotonic(),
+                                      note='Stationary football diagnostics; no motion')}
+                else:
+                    await self.workers['stream'].call('videostream.stop_source', {'name': 'detection'})
+                result = await self.workers["detection"].call(op, body)
+                self.football_diagnostic = op == 'detection.start' and body.get('mode') == 'football'
+                return result
         if op in ("camera.start", "camera.stop"):
             if not _from_game:
                 self.require_control(session, body)
@@ -779,7 +871,7 @@ class Supervisor:
         for dependency in source["dependencies"]:
             other = self.workers.get(dependency)
             try:
-                if other is None or not getattr(other, "alive", True) or not (await other.call("state")).get("running"):
+                if other is None or not getattr(other, "alive", True) or not (await other.call(f"{dependency}.status")).get("running"):
                     available, reason = False, "dependency_not_ready"
             except Fault:
                 available, reason = False, "dependency_not_ready"
@@ -890,9 +982,46 @@ class Supervisor:
                 await self.workers["stream"].call("videostream.stop_source", {"name": role})
             await self._sync_video_sources(force_off=role == "stream" and op == "worker.fault")
 
+    async def _reset_motherboard(self):
+        if self.bootstrap is None:
+            self.log('supervisor', 'ERROR', 'Automatic motherboard reset unavailable: no GPIO bootstrap owner')
+            return
+        attempt = 0
+        async with self.capture_lock:
+            try:
+                await self._stop_capture()
+            except Exception as exc:
+                self.log('supervisor', 'WARNING', f'Capture stop before motherboard reset: {exc}')
+            while not self.closing:
+                attempt += 1
+                self.log('supervisor', 'ERROR', f'Motherboard ACM lost: full STM GPIO reset, attempt {attempt}')
+                try:
+                    # Keep the GPIO thread alive until it releases reset; do not
+                    # release its line underneath it during application shutdown.
+                    boot = asyncio.create_task(asyncio.to_thread(self.bootstrap.start))
+                    try:
+                        await asyncio.shield(boot)
+                    except asyncio.CancelledError:
+                        await boot
+                        raise
+                    if self.closing:
+                        return
+                    await self.workers['motherboard'].call('motherboard.reconnect', timeout=10)
+                    self.log('supervisor', 'INFO', 'STM reset complete; checking body, previous motion will not resume')
+                    return
+                except Exception as exc:
+                    self.log('supervisor', 'ERROR', f'Motherboard reset failed: {exc}')
+                    await asyncio.sleep(min(10, attempt * 2))
+
     async def _stop_capture(self):
         self.capture_session = None
         self.alignment_pending.clear()
+        # detection.stop is diagnostic-only; losing capture must also stop the
+        # game-owned observer so the strategy can detect and recover the fault.
+        try:
+            await self.workers['detection'].call('ball.stop', timeout=5)
+        except Fault as exc:
+            self.log('supervisor', 'WARNING', f'Game observation stop: {exc}')
         if "localisation" in self.workers:
             try:
                 await self.workers["localisation"].call("localisation.stop")
@@ -900,6 +1029,7 @@ class Supervisor:
                 self.log("supervisor", "WARNING", f"Localisation stop: {exc}")
         try:
             await self.workers["detection"].call("detection.stop")
+            await self.workers['stream'].call('videostream.stop_source', {'name': 'detection'})
         except Fault as exc:
             self.log("supervisor", "WARNING", f"Detection stop: {exc}")
         try:
@@ -976,7 +1106,7 @@ class Supervisor:
             try:
                 job = await worker.call("job.status", {"job_id": ident})
                 values = result["values"]
-                if (job["status"] != "saving" or job.get("calibration") != values
+                if (job["status"] not in ('saving', 'cancelled', 'failed') or job.get("calibration") != values
                         or set(values) != set(ROTATION_KEYS)):
                     raise Fault("calibration_invalid", "Unexpected calibration result")
                 await asyncio.to_thread(self.params.set_many, values)
@@ -1018,10 +1148,15 @@ class Supervisor:
         worker = self.workers.get(role)
         observed = worker.last_heartbeat if worker else time.monotonic()
         if topic == "localisation.state":
-            return {"topic": topic, "valid": False,
+            data = self._snapshot(topic)
+            age = data.get('age_ms')
+            transport_age = max(0, round((time.monotonic()-observed)*1000))
+            valid = bool(worker and worker.alive and data.get('running') and not data.get('error')
+                         and (data.get('result') or {}).get('valid')
+                         and type(age) in (int,float) and 0<=age+transport_age<=500)
+            return {"topic": topic, "valid": valid,
                     "source_mono_ns": int(observed * 1e9),
-                    "age_ms": round((time.monotonic() - observed) * 1000),
-                    "data": self._snapshot(topic)}
+                    "age_ms": transport_age, "data": data}
         return {"topic": topic, "valid": bool(worker.alive) if worker else topic == "system.workers",
                 "source_mono_ns": int(observed * 1e9),
                 "age_ms": round((time.monotonic() - observed) * 1000), "data": self._snapshot(topic)}
@@ -1162,9 +1297,14 @@ class Supervisor:
                     if selected or dropped:
                         self.send(session, "sample", "log.sample", {"subscription": "logs", "records": selected, "dropped": dropped})
             for worker in list(self.workers.values()):
+                if (worker is self.workers.get('motherboard') and self.motherboard_reset_task
+                        and not self.motherboard_reset_task.done()):
+                    continue  # Bounded ACM reopen may outlast a normal heartbeat.
                 if worker.alive and now - worker.last_heartbeat > 5:
                     worker._failed("Heartbeat timeout; process will be terminated")
                     self.spawn(worker.close())
+            if self.head_menu:
+                await self.head_menu.observe_game(self.game.state())
 
     async def close(self):
         self.closing = True

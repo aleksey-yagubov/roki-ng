@@ -20,9 +20,18 @@ def test(label, name, **args):
 
 
 def menu_tree():
-    def forward(position, delay=0):
+    def forward(position, delay=0, strategy='forward'):
         return Item("Start later" if delay else "Start", op="game.start",
-                    args={"strategy": "forward", "entry": position, "delay_seconds": delay})
+                    args={"strategy": strategy, "entry": position, "delay_seconds": delay})
+
+    def danger(position):
+        angled = tuple(Item('Kick '+side, tuple(Item('Start later' if delay else 'Start',
+            op='game.start', args=dict(strategy='danger_football', entry=position,
+                                      delay_seconds=delay, kick_direction=side)) for delay in (0, 10)))
+            for side in ('left', 'right'))
+        kickoff = Item('Kickoff left', (Item('Start', op='game.start', args=dict(
+            strategy='danger_football', entry=position, kick_direction='kickoff_left', delay_seconds=0)),))
+        return (kickoff,) + angled + (forward(position, strategy='danger_football'), forward(position, 10, 'danger_football'))
 
     other = (
         test("Run backwards", "run_test", mode="backwards"),
@@ -30,16 +39,33 @@ def menu_tree():
           for direction in ("forward", "backward", "left", "right", "on_spot")),
     )
     return Item("Main menu", (
-        Item("Game", (Item("Football", (
-            Item("Goalkeeper", (Item("Start", op="game.start",
-                 args={"strategy": "FIRA_penalty_Goalkeeper", "delay_seconds": 0, "observe_only": False}),
-                 Item("Observe only", op="game.start", args={"strategy": "FIRA_penalty_Goalkeeper", "observe_only": True}))),
-            Item("Forward", (
-                Item("Left", (forward("left"),)),
-                Item("Center", (forward("center"), forward("center", 10))),
-                Item("Right", (forward("right"),)),
+        Item("Game", (
+            Item("Football", (
+                Item("Goalkeeper", (Item("Start", op="game.start",
+                     args={"strategy": "FIRA_penalty_Goalkeeper", "delay_seconds": 0}),)),
+                Item("Forward", (
+                    Item("Left", (forward("left"),)),
+                    Item("Center", (forward("center"), forward("center", 10))),
+                    Item("Right", (forward("right"),)),
+                )),
+                Item('Own goal', (
+                    Item('Own yellow goal', op='menu.own_goal', args={'colour': 'yellow'}),
+                    Item('Own blue goal', op='menu.own_goal', args={'colour': 'blue'}),
+                )),
             )),
-        )),)),
+            Item('Simple football', tuple(
+                Item('Own '+colour+' goal', (
+                    Item('Goalkeeper', (Item('Start', op='game.start', args={'strategy': 'simple_goalkeeper'}),)),
+                    Item('Left', (forward('left', strategy='simple_football'),)),
+                    Item('Center', (forward('center', strategy='simple_football'), forward('center', 10, 'simple_football'))),
+                    Item('Right', (forward('right', strategy='simple_football'),)),
+                ), op='menu.own_goal', args={'colour': colour}) for colour in ('yellow', 'blue'))),
+            Item('Danger football', (
+                Item('Left', danger('left')),
+                Item('Center', danger('center')),
+                Item('Right', danger('right')),
+            )),
+        )),
         Item("Tests", (
             test("Rotation right", "rotation_test"),
             test("Short run", "run_test", mode="short"),
@@ -50,6 +76,7 @@ def menu_tree():
             test("Side step right", "run_test", mode="side_right"),
             test("Get up test", "get_up_test"),
             Item("Other tests", other),
+            Item("Ball approach and kick", op="game.start", args={"strategy": "ball_kick_test"}),
         )),
     ))
 
@@ -64,6 +91,9 @@ class HeadMenu:
         self.stopping = False
         self.finishing = False
         self.game_active = False
+        self.pickup_mode = False
+        self.pickup_pending = False
+        self.pickup_state = None
 
     @property
     def selected(self):
@@ -75,7 +105,9 @@ class HeadMenu:
             return
         if self.finishing:
             return
-        if self.job or self.action and not self.action.done():
+        if self.game_active and not self.pickup_mode:
+            return  # Short Back (and navigation) cannot stop an active game.
+        if (self.job and not self.pickup_mode) or self.action and not self.action.done():
             if key == "back":
                 self.cancel_requested = True
                 if self.job and (self.action is None or self.action.done()):
@@ -89,7 +121,7 @@ class HeadMenu:
             node, index = self.stack[-1]
             self.stack[-1][1] = (index + (1 if key == "right" else -1)) % len(node.children)
             self.say(self.selected.label)
-        elif self.selected.children:
+        elif self.selected.children and self.selected.op is None:
             self.stack.append([self.selected, 0])
             self.say(self.selected.label)
         else:
@@ -98,13 +130,15 @@ class HeadMenu:
 
     def hold(self, key):
         """A hold is distinct from menu navigation; only an active game uses it."""
-        if key == 'back' and self.game_active and not self.finishing:
-            self.action = asyncio.create_task(self._pickup())
+        if key == 'back' and self.game_active and not self.finishing and not self.pickup_mode:
+            if self.job is None:
+                self.pickup_pending = True
+            elif self.action is None or self.action.done():
+                self.action = asyncio.create_task(self._pickup())
 
     async def _pickup(self):
         try:
             await self.command('game.pickup', {})
-            self.say('Pick up')
         except Exception as exc:
             self._error(exc)
 
@@ -121,15 +155,35 @@ class HeadMenu:
         self.say(text)
 
     async def _start(self, item):
+        previous_game = self.game_active
         try:
+            if item.op == 'menu.own_goal':
+                result = await self.command(item.op, dict(item.args))
+                self.say('Own ' + result['colour'] + ' goal selected')
+                if item.children:
+                    self.stack.append([item, 0])
+                    self.say(self.selected.label)
+                return
+            if item.op == 'game.pickup':
+                await self.command(item.op, item.args)
+                self.pickup_mode = False
+                self.pickup_state = None
+                return
             self.game_active = item.op == 'game.start'
             result = await self.command(item.op, dict(item.args))
             self.job = result["job_id"]
             ident = self.job
             if self.game_active:
-                self.say('Goalkeeper observing' if result['observe_only'] else 'Goalkeeper started')
-                if self.cancel_requested:
-                    await self._cancel()
+                self.pickup_mode = False
+                self.pickup_state = None
+                self.say('Danger football started' if result['role'] == 'danger_football' else
+                         'Simple goalkeeper started' if result['role'] == 'simple_goalkeeper' else
+                         'Simple football started' if result['role'] == 'simple_football' else
+                         'Ball kick test started' if result['role'] == 'ball_kick_test' else
+                         'Forward started' if result['role'] == 'forward' else 'Goalkeeper started')
+                if self.pickup_pending:
+                    self.pickup_pending = False
+                    await self._pickup()
                 await self.game_finished(await self.command('game.status', {}))
                 return
             self.say("Test started")
@@ -139,7 +193,7 @@ class HeadMenu:
             status = await self.command("job.status", {"job_id": ident})
             await self._finish(status)
         except Exception as exc:
-            self.game_active = False
+            self.game_active = previous_game and self.job is not None
             self._error(exc)
             if self.job is None:
                 await self.release()
@@ -193,21 +247,55 @@ class HeadMenu:
             self.action.cancel()
         self.job = None
         self.game_active = False
+        self.pickup_mode = self.pickup_pending = False
+        self.pickup_state = None
         self.stopping = self.cancel_requested = False
         self.say("Operator control")
 
     async def game_finished(self, status):
-        if not self.game_active or status.get('running') or status.get('job_id') != self.job:
+        if not self.game_active or status.get('job_id') != self.job:
+            return
+        if status.get('running'):
+            pickup_state = (status.get('pickup_ready'), status.get('pickup_confirmation_required'))
+            if status.get('pickup') and pickup_state != self.pickup_state:
+                self.pickup_state = pickup_state
+                choices = ()
+                if pickup_state[0]:
+                    game_menu = menu_tree().children[0]
+                    choices = game_menu.children[0].children + game_menu.children[1:]
+                elif pickup_state[1]:
+                    choices = (Item('Confirm upright', op='game.pickup', args={'confirm': True}),)
+                self.pickup_mode = bool(choices)
+                if choices:
+                    self.stack = [[Item('Pick up', choices), 0]]
+                    self.say(self.selected.label)
             return
         self.game_active = False
+        self.pickup_mode = self.pickup_pending = False
+        self.pickup_state = None
         self.job = None
         self.finishing = True
         try:
             await self.release()
         finally:
             self.finishing = False
-        self.say('Goalkeeper failed' if status.get('state') == 'failed' else 'Goalkeeper stopped')
+        role = ('Danger football' if status.get('role') == 'danger_football' else
+                'Simple goalkeeper' if status.get('role') == 'simple_goalkeeper' else
+                'Simple football' if status.get('role') == 'simple_football' else
+                'Ball kick test' if status.get('role') == 'ball_kick_test' else
+                'Forward' if status.get('role') == 'forward' else 'Goalkeeper')
+        self.say(role + (' failed' if status.get('state') == 'failed' else ' stopped'))
         self.stopping = self.cancel_requested = False
+
+    async def observe_game(self, status):
+        """Physical Pick up is available for games started by GUI as well."""
+        if self.finishing or self.action and not self.action.done():
+            return
+        if status.get('running') and status.get('job_id') and not self.game_active and not self.job:
+            self.game_active = True
+            self.job = status['job_id']
+            self.pickup_state = None
+        await self.game_finished(status)
 
     async def close(self):
         if self.action:
@@ -327,6 +415,8 @@ class HeadButtons:
                         dropped = True
                     elif dropped:
                         if event.type == ecodes.EV_SYN and event.code == ecodes.SYN_REPORT:
+                            for task in self.hold_tasks.values(): task.cancel()
+                            self.hold_tasks.clear()
                             self.held = set(self.device.active_keys())
                             dropped = False
                     else:
