@@ -1,8 +1,29 @@
 # Контракты внутреннего IPC
 
-Обновлено 26.09.2026. Реализованы supervisor, motherboard-worker,
-camera-worker, stream-worker и detection-worker. Детектор пока выделяет только
-LAB-области; локализация, игра и нейрообработка ещё не реализованы.
+## Simple football
+
+`ball.start` принимает `football:bool` (по умолчанию false). В этом режиме тот же
+синхронный поток кадров/IMU дополнительно выдаёт сцену без локализации.
+`football.decision {blocks}` передаёт источники фактического own-goal veto для
+подписи на отладочном потоке; пустой список снимает подпись. Не управляет движением
+и не ослабляет критерии детекции. Источник хранит frame_sequence, sensor_timestamp_ns,
+pan/tilt, rect, area, parameter_revision и reason; координаты старого кадра не
+накладываются на новый ракурс. Показ последнего решения ограничен 3 секундами.
+
+`football.pose {active, pose_id, pan, tilt, after, note, goal_bearing_only, goal_veto_enabled}` открывает неподвижный
+осмотр после завершения задания головы; `active:false` закрывает его и сбрасывает
+подтверждения. `after` — monotonic, pan/tilt — тики головы.
+`football.status` возвращает valid, pose_id, sequence, stamp кадра, received
+monotonic, age_ms, parameter_revision, confirmed, ball=[X,Y] либо null,
+parts (kind=post/bar, colour, points в метрах относительно тела, rect в пикселях)
+и height_m. Подтверждение требует двух разных согласованных кадров одной позы.
+Это внутренний результат worker, не отдельная операторская UDP-команда.
+Стратегия не сохраняет сцену через движение тела и не суммирует сегменты пути.
+
+Реализованы supervisor, motherboard-worker, camera-worker, stream-worker,
+detection-worker и localisation-worker. Стратегия игры выполняется внутри
+supervisor. Detection включает LAB-настройку и игровое наблюдение мяча;
+отдельная диагностика использует тот же алгоритм без команд движения.
 
 ## Статическая топология
 
@@ -57,6 +78,7 @@ dataplane.py создаёт iceoryx2 publish/subscribe и event с одинак�
 | roki/camera/frame | заголовок и BGR-пиксели | 4 |
 | roki/motherboard/imu | sequence, время Bosch, quaternion, sensor ID | 128 |
 | roki/detection/blobs | MessagePack, до четырёх областей с ID кадра | 4 |
+| roki/detection/frame | BGR 800×650: диагностические маски и решения на одном кадре, on-demand до 5 Гц | 4 |
 
 Publisher запрашивает loan, заполняет его и передаёт владение iceoryx2.
 В случае ошибки заполнения запись не публикуется. В camera-worker необходима

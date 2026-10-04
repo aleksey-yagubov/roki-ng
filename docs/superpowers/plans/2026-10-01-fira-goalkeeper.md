@@ -1,5 +1,9 @@
 # FIRA Goalkeeper Implementation Plan
 
+Исторический план от 1 октября. Ограничения Observe only и geometry_verified
+отменены последующими решениями; актуальный контракт и незавершённые части:
+[FIRA_GOALKEEPER.md](../../FIRA_GOALKEEPER.md).
+
 > For agentic workers: execute with subagent-driven-development and review each component.
 
 Goal: implement the existing FIRA_penalty_Goalkeeper menu strategy with observable decisions, bounded lateral movement and explicit stop.

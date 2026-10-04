@@ -58,6 +58,9 @@
 
 ## Документы
 
+- [Шаблон поля 3,40 × 2,40 м](FIELD_TEMPLATE.md): шесть круглых точек,
+  три палочки, размеры и применение черновика из GUI.
+
 - [Камера и видеопередача](CAMERA_VIDEOSTREAM_PROTOCOL.md): реализованные
   camera.*, videostream.*, права, источники, получатели и live max_fps.
 - [Передача GUI-агенту](GUI_CAMERA_VIDEOSTREAM_HANDOFF.md): необходимые изменения
