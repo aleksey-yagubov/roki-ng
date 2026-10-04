@@ -16,12 +16,12 @@ def goal_candidates(image,parameters=None):
     green=colour_mask(lab,parameters,'green_field')!=0
     joined=cv2.morphologyEx(green.astype(np.uint8),cv2.MORPH_CLOSE,np.ones((31,31),np.uint8))
     count,field_labels,field_stats,_=cv2.connectedComponentsWithStats(joined)
-    if count<2:return []
-    field_id=1+np.argmax(field_stats[1:,cv2.CC_STAT_AREA])
-    if field_stats[field_id,cv2.CC_STAT_AREA]<image.shape[0]*image.shape[1]*.1:return []
-    green&=field_labels==field_id
+    if count>1:
+        field_id=1+np.argmax(field_stats[1:,cv2.CC_STAT_AREA])
+        green &= (field_labels==field_id) & (field_stats[field_id,cv2.CC_STAT_AREA]>=image.shape[0]*image.shape[1]*.1)
+    white_ground=colour_mask(lab,parameters,'white_marking')!=0
     results=[]
-    for colour in ('blue','yellow'):
+    for colour in ('blue','yellow','white'):
         mask=colour_mask(lab,parameters,colour+'_posts')
         vertical=cv2.morphologyEx(mask,cv2.MORPH_OPEN,np.ones((17,3),np.uint8))
         n,labels,stats,_=cv2.connectedComponentsWithStats(vertical)
@@ -39,12 +39,12 @@ def goal_candidates(image,parameters=None):
             left,right=max(0,int(foot_x)-half),min(800,int(foot_x)+half+1)
             stop=min(650,foot_y+34)
             patch=green[foot_y+2:stop,left:right]
-            white=colour_mask(lab[foot_y+2:stop,left:right],parameters,'white_marking')!=0
+            white=white_ground[foot_y+2:stop,left:right]
             if patch.shape[0]<16:continue
             # A gap is permitted only when it is paint, not arbitrary background.
             supported=False
             for offset in (0,8,16):
-                turf=patch[offset:offset+16]
+                turf=(patch|white)[offset:offset+16]
                 if len(turf)<16:continue
                 bridge=(patch|white)[:offset]
                 if offset and np.mean(bridge)<.8:continue
@@ -63,20 +63,19 @@ def upright_candidates(candidates,projector,quaternion,goals,tolerance):
     accepted=[]
     for post in candidates:
         matches=[g for g in goals if g['colour']==post['colour']]
-        if len(matches)!=1:continue
+        if not matches:continue
         x,y,w,h=post['rect']
         try:height=projector.upright_height(post['foot_px'],[x+w/2,y],quaternion)
         except ValueError:continue
-        expected=matches[0]['height']
-        if abs(height-expected)<=expected*tolerance:accepted.append(post)
-    return [p for colour in ('blue','yellow') for p in [p for p in accepted if p['colour']==colour][:6]]
+        if any(abs(height-g['height'])<=g['height']*tolerance for g in matches):accepted.append(post)
+    return [p for colour in ('blue','yellow','white') for p in [p for p in accepted if p['colour']==colour][:6]]
 
 
 def paired_bearings(candidates,projector,quaternion):
     """Require two spatially separate upright colour components, not one blob."""
     from itertools import combinations
     result=[]
-    for colour in ('blue','yellow'):
+    for colour in ('blue','yellow','white'):
         projected=[]
         for post in [p for p in candidates if p['colour']==colour][:6]:
             try:
@@ -97,27 +96,28 @@ def bearing_log_likelihood(particles,observations,goals,max_foot_error=.35):
     scores_by_colour={}
     for observation in observations:
         matches=[g for g in goals if g['colour']==observation['colour']]
-        if len(matches)!=1:continue
+        if not matches:continue
         if 'ground_feet' not in observation:continue
         feet=np.asarray(observation['ground_feet'],float)
         if feet.shape!=(2,2) or not np.isfinite(feet).all():continue
-        g=matches[0];angles=np.asarray(observation['bearings'],float)
+        angles=np.asarray(observation['bearings'],float)
         if angles.shape!=(2,) or not np.isfinite(angles).all():continue
         if abs((angles[0]-angles[1]+np.pi)%(2*np.pi)-np.pi)<.08:continue
-        endpoints=np.array([[g['x'],g['y']-g['width']/2],[g['x'],g['y']+g['width']/2]])
-        delta=endpoints[None,:,:]-particles[:,None,:2]
-        predicted=np.arctan2(delta[:,:,1],delta[:,:,0])-particles[:,2,None]
         c,s=np.cos(particles[:,2]),np.sin(particles[:,2])
         world=np.stack((c[:,None]*feet[:,0]-s[:,None]*feet[:,1]+particles[:,0,None],
                         s[:,None]*feet[:,0]+c[:,None]*feet[:,1]+particles[:,1,None]),axis=-1)
         errors=[]
-        for target,endpoint_order in ((angles,endpoints),(angles[::-1],endpoints[::-1])):
-            residual=(predicted-target+np.pi)%(2*np.pi)-np.pi
-            error=np.mean(residual**2,axis=1)
-            foot_error=np.linalg.norm(world-endpoint_order[None,:,:],axis=-1).max(axis=1)
-            error=np.where(foot_error<=max_foot_error,error,np.inf)
-            errors.append(error)
-        best=np.minimum(*errors)
+        for g in matches:
+            endpoints=np.array([[g['x'],g['y']-g['width']/2],[g['x'],g['y']+g['width']/2]])
+            delta=endpoints[None,:,:]-particles[:,None,:2]
+            predicted=np.arctan2(delta[:,:,1],delta[:,:,0])-particles[:,2,None]
+            for target,endpoint_order in ((angles,endpoints),(angles[::-1],endpoints[::-1])):
+                residual=(predicted-target+np.pi)%(2*np.pi)-np.pi
+                error=np.mean(residual**2,axis=1)
+                foot_error=np.linalg.norm(world-endpoint_order[None,:,:],axis=-1).max(axis=1)
+                error=np.where(foot_error<=max_foot_error,error+(foot_error*.15/.10)**2,np.inf)
+                errors.append(error)
+        best=np.min(errors,axis=0)
         if not np.isfinite(best).any():continue
         # Allow uncertain width/extrinsics; contradictory pairs retain outliers.
         score=np.log(.005+.995*np.exp(-.5*best/.15**2))
@@ -126,6 +126,31 @@ def bearing_log_likelihood(particles,observations,goals,max_foot_error=.35):
         if colour in scores_by_colour:score=np.maximum(scores_by_colour[colour],score)
         scores_by_colour[colour]=score
     return sum(scores_by_colour.values(),np.zeros(len(particles))),len(scores_by_colour)
+
+
+def pair_poses(observations, goals, tolerance):
+    """Metric two-post hypotheses, including both endpoint assignments.
+
+    The two assignments and repeated colours remain alternatives, not proof of
+    field side. Neither a single post nor matching bearings gives a full pose.
+    """
+    poses=[]
+    for observation in observations:
+        feet=np.asarray(observation.get('ground_feet', []),float)
+        if feet.shape!=(2,2) or not np.isfinite(feet).all():continue
+        vector=feet[1]-feet[0]
+        distance=np.linalg.norm(vector)
+        for goal in goals:
+            if observation['colour']!=goal['colour'] or abs(distance-goal['width'])>min(tolerance,.15):continue
+            ends=np.array([[goal['x'],goal['y']-goal['width']/2],[goal['x'],goal['y']+goal['width']/2]])
+            for target in (ends,ends[::-1]):
+                direction=target[1]-target[0]
+                yaw=float(np.arctan2(direction[1],direction[0])-np.arctan2(vector[1],vector[0]))
+                yaw=(yaw+np.pi)%(2*np.pi)-np.pi
+                c,s=np.cos(yaw),np.sin(yaw)
+                xy=target.mean(axis=0)-feet.mean(axis=0)@np.array([[c,s],[-s,c]])
+                poses.append([*xy,yaw])
+    return np.asarray(poses,float).reshape(-1,3)
 
 
 def mapped_candidates(candidates,projector,quaternion,result,goals,tolerance):
@@ -139,12 +164,11 @@ def mapped_candidates(candidates,projector,quaternion,result,goals,tolerance):
     accepted=[]
     for post in candidates:
         matches=[g for g in goals if g['colour']==post['colour']]
-        if len(matches)!=1:continue
+        if not matches:continue
         try:foot=projector.ground_point(post['foot_px'],quaternion)
         except ValueError:continue
         world=np.array([x+c*foot[0]-s*foot[1],y+s*foot[0]+c*foot[1]])
-        g=matches[0]
-        ends=np.array([[g['x'],g['y']-g['width']/2],[g['x'],g['y']+g['width']/2]])
+        ends=np.array([[g['x'],g['y']+side*g['width']/2] for g in matches for side in (-1,1)])
         if np.min(np.linalg.norm(ends-world,axis=1))<=tolerance:accepted.append(post)
     # Keep the existing telemetry bound: at most two posts per colour.
-    return [p for colour in ('blue','yellow') for p in [p for p in accepted if p['colour']==colour][:2]]
+    return [p for colour in ('blue','yellow','white') for p in [p for p in accepted if p['colour']==colour][:2]][:4]

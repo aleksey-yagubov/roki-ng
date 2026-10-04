@@ -74,6 +74,19 @@ def circle_model(parameters):
     return circles
 
 
+def disk_model(parameters):
+    # Filled spots must never enter the ring/centre-circle association model.
+    return [{'center':[m['x'],m['y']], 'radius':m['size']/2}
+            for key,m in parameters.items()
+            if key.startswith('field.mark.') and m['enabled'] and m['kind']=='disk']
+
+
+def short_line_lengths(parameters):
+    return sorted({m['size'] for key,m in parameters.items()
+                   if key.startswith('field.mark.') and m['enabled']
+                   and m['kind']=='line' and .04<=m['size']<=.3})
+
+
 def configuration_id(parameters):
     """Identity of the saved metric map/extrinsics used for one capture."""
     import hashlib

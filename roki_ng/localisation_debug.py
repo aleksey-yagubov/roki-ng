@@ -2,7 +2,7 @@
 import cv2
 import numpy as np
 
-def video_frame(image,projector,quaternion,lines,circle,posts,result,model,circles=None):
+def video_frame(image,projector,quaternion,lines,circle,posts,result,model,circles=None,*,spots=None):
     """Burn observations onto exactly the frame consumed by localization."""
     from .field_observations import likelihood
     out=image.copy();errors=None
@@ -20,11 +20,16 @@ def video_frame(image,projector,quaternion,lines,circle,posts,result,model,circl
         angles=np.linspace(0,2*np.pi,100)
         centre=np.asarray(circle['center_robot_m']);r=circle['radius_observed_m']
         curve(centre+r*np.column_stack((np.cos(angles),np.sin(angles))),(255,0,255))
+    for spot in spots or []:
+        angles=np.linspace(0,2*np.pi,32)
+        centre=np.asarray(spot['center_robot_m']);r=spot['radius_observed_m']
+        curve(centre+r*np.column_stack((np.cos(angles),np.sin(angles))),(255,255,0))
     for p in posts:
-        x,y,w,h=p['rect'];colour=(255,140,20) if p['colour']=='blue' else (0,230,255)
+        x,y,w,h=p['rect'];colour=(40,230,40) if p.get('metric_valid') else (0,150,255)
         cv2.rectangle(out,(x,y),(x+w,y+h),colour,3)
-        cv2.putText(out,p['colour'],(x,max(18,y-5)),cv2.FONT_HERSHEY_SIMPLEX,.6,colour,2)
+        label=p['colour']+(' mapped' if p.get('metric_valid') else ' candidate')
+        cv2.putText(out,label,(x,max(18,y-5)),cv2.FONT_HERSHEY_SIMPLEX,.6,colour,2)
     cv2.rectangle(out,(0,0),(800,65),(20,20,20),-1)
     cv2.putText(out,f"Frame {result['frame_sequence']} | {result.get('fit_state','no fit')} | lines {len(lines)} | goals {len(posts)} rejected {result.get('goal_rejected',0)}",(8,24),cv2.FONT_HERSHEY_SIMPLEX,.55,(255,255,255),1)
-    cv2.putText(out,str(result.get('reason',''))[:100],(8,49),cv2.FONT_HERSHEY_SIMPLEX,.46,(230,230,230),1)
+    cv2.putText(out,f"{result.get('reason','')} | spots {len(spots or [])}"[:100],(8,49),cv2.FONT_HERSHEY_SIMPLEX,.46,(230,230,230),1)
     return out

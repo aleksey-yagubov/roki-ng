@@ -34,11 +34,14 @@ def scene(centres=((400, 400),), turf=True):
     return image
 
 
-def test_field_support_and_unchanged_foot_projection():
+def test_field_support_and_original_ball_centre_radius_projection():
     projector = Projector()
     candidates = ball_candidates(scene(), parameters(), projector, [0, 0, 0, 1])
-    assert candidates == [dict(x_m=1., y_m=.1, rect=[380, 380, 421, 421])]
-    assert projector.pixels == [(400., 420.)]
+    scale = 1-parameters()['game.ball_diameter_m']/2/parameters()['game.camera_height_m']
+    assert candidates[0]['x_m'] == pytest.approx(scale)
+    assert candidates[0]['y_m'] == pytest.approx(.1*scale)
+    assert candidates[0]['rect'] == [380, 380, 421, 421]
+    assert projector.pixels == [(400., 400.)]
     assert not ball_candidates(scene(turf=False), parameters(), projector, [0, 0, 0, 1])
 
 
@@ -109,19 +112,19 @@ def test_temporal_freshness_and_rejection():
     assert tracker.update([candidate()], 8, 800, 1.3, 1.9)['reason'] == 'stale'
 
 
-def test_nearest_ball_is_available_immediately_and_can_move_quickly():
+def test_lowest_ball_centre_is_selected_as_in_original():
     class DistanceProjector:
         def ground_point(self, pixel, quaternion):
             return (800-pixel[0])/200, .1
 
-    image = scene(((300, 400), (500, 400), (700, 400)))
+    image = scene(((300, 430), (500, 400), (700, 400)))
     # A nearer orange distractor without field support must not win selection.
     image[350:480, 630:780] = 0
     cv2.circle(image, (700, 400), 20, (0, 140, 255), -1)
     candidates = ball_candidates(image, parameters(), DistanceProjector(), [0, 0, 0, 1])
     tracker = BallTracker()
     first = tracker.update(candidates, 1, 1, .1, .1)
-    assert first['valid'] and first['rect'] == [480, 380, 521, 421]
+    assert first['valid'] and first['rect'] == [280, 410, 321, 451]
     for order in (candidates, list(reversed(candidates))):
         assert BallTracker().update(order, 1, 1, .1, .1)['rect'] == first['rect']
     moved = tracker.update([candidate(2.5)], 2, 2, .2, .2)

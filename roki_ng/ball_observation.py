@@ -1,17 +1,18 @@
 """Colour ball observations with legacy field support and synchronized projection.
 
-The bottom of the orange silhouette approximates floor contact. A sphere's visible
-silhouette is not its contact point: range has a radius/perspective bias. This is
-not radius-corrected metrology. Pan must be held centred by the coordinator; the
-paired head IMU supplies pitch/roll and the coordinator handles body heading.
+The original blob centre is projected to the plane at ball-radius height.
+The paired head IMU supplies pitch/roll; results
+are head-level coordinates. The coordinator rotates them by the acknowledged
+stationary pan and rejects frames captured before that head job completed.
 """
 import json
 import math
 from pathlib import Path
 import threading
 import time
+from collections import deque
 
-from .wire import Fault
+from .wire import Fault, number
 
 FRESH_SECONDS = .5
 
@@ -47,46 +48,57 @@ def field_near_ball(rect, green, white):
     return False
 
 
-def ball_candidates(image, parameters, projector, quaternion):
+def ball_candidates(image, parameters, projector, quaternion, camera_height=None, *, debug=None):
     import cv2
     import numpy as np
     if image.shape != (650, 800, 3) or image.dtype != np.uint8:
         raise ValueError('Expected packed 800x650 BGR image')
+    from .vision_diagnostics import lab_mask
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-    def mask(profile):
-        p = [parameters[f'vision.{profile}.{k}'] for k in
-             ('l_min', 'l_max', 'a_min', 'a_max', 'b_min', 'b_max')]
-        return cv2.inRange(lab, (int(p[0]*2.55), p[2]+128, p[4]+128),
-                           (math.ceil(p[1]*2.55), p[3]+128, p[5]+128))
-    orange, turf, white = mask('orange_ball'), mask('green_field'), mask('white_marking')
-    _, labels, stats, _ = cv2.connectedComponentsWithStats(
+    orange, turf, white = (lab_mask(lab, parameters, profile) for profile in
+                           ('orange_ball', 'green_field', 'white_marking'))
+    _, labels, stats, centers = cv2.connectedComponentsWithStats(
         orange, connectivity=8, ltype=cv2.CV_32S)
     candidates = [i for i in range(1, len(stats))
                   if stats[i, cv2.CC_STAT_AREA] >= parameters['vision.orange_ball.pixels_min']
                   and stats[i, cv2.CC_STAT_WIDTH]*stats[i, cv2.CC_STAT_HEIGHT]
                   >= parameters['vision.orange_ball.box_area_min']]
-    candidates.sort(key=lambda i: stats[i, cv2.CC_STAT_TOP] + stats[i, cv2.CC_STAT_HEIGHT]/2,
+    candidates.sort(key=lambda i: centers[i][1],
                     reverse=True)
+    if debug is not None:
+        debug.update(masks={'Orange LAB': orange, 'Green support': turf, 'White support': white},
+                     objects=[], counts={'components': len(stats)-1,
+                                         'area_rejected': len(stats)-1-len(candidates),
+                                         'eligible': len(candidates), 'examined': 0})
+    def decision(rect, reason, **measurement):
+        if debug is not None:
+            debug['objects'].append(dict(rect=rect, reason=reason, **measurement))
+            counts = debug['counts']
+            counts['examined'] += 1
+            counts[reason] = counts.get(reason, 0)+1
     found = []
     for i in candidates[:10]:
         x, y, w, h, _ = map(int, stats[i])
+        rect = [x, y, x+w, y+h]
         if not field_near_ball((x, y, w, h), turf, white):
+            decision(rect, 'no_field')
             continue
-        # Keep the existing silhouette-foot projection; do not change geometry
-        # together with candidate selection. Isolate this component from neighbours.
-        component = (labels[y:y+h, x:x+w] == i).astype(np.uint8)
-        contours, _ = cv2.findContours(component, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        contour = np.concatenate(contours) + (x, y)
-        points = contour.reshape(-1, 2)
-        bottom = points[:, 1].max()
-        foot_x = float(np.mean(points[points[:, 1] >= bottom-1, 0]))
+        # Same ray as the original blob.cx()/cy(), not silhouette-floor contact.
+        center = tuple(map(float, centers[i]))
         try:
-            px, py = map(float, projector.ground_point((foot_x, float(bottom)), quaternion))
+            px, py = map(float, projector.ground_point(center, quaternion))
         except ValueError:
+            decision(rect, 'projection')
             continue
+        height = parameters['game.camera_height_m'] if camera_height is None else camera_height
+        scale = (height-parameters['game.ball_diameter_m']/2)/parameters['game.camera_height_m']
+        px, py = px*scale, py*scale
         if not math.isfinite(px) or not math.isfinite(py) or px <= 0 or math.hypot(px, py) > parameters.get('game.ball_max_distance_m', 3.):
+            decision(rect, 'range')
             continue
-        found.append(dict(x_m=px, y_m=py, rect=[x, y, x+w, y+h]))
+        decision(rect, 'selected', x_m=px, y_m=py, distance_m=math.hypot(px, py))
+        found.append(dict(x_m=px, y_m=py, rect=[x, y, x+w, y+h], center_px=list(center)))
+        break  # Original selection: the lowest valid orange blob, not nearest range.
     return found
 
 
@@ -112,7 +124,8 @@ class BallTracker:
             return self.invalidate('no_ball', sequence, stamp)
         candidate = min(candidates, key=lambda c: math.hypot(c['x_m'], c['y_m']))
         self.result = dict(valid=True, reason='ok',
-                           frame_sequence=sequence, sensor_timestamp_ns=stamp, **candidate)
+                           frame_sequence=sequence, sensor_timestamp_ns=stamp,
+                           **{k: v for k, v in candidate.items() if k != 'center_px'})
         return self.result
 
     def state(self, now):
@@ -133,12 +146,54 @@ class BallObservation:
         self.lock = threading.Lock()
         self.tracker = BallTracker()
         self.error = None
+        self.geometry_history = deque(maxlen=128)
+        from .football_vision import SceneTracker
+        self.scene_tracker = SceneTracker()
+        self.football = False
+        self.scene_pose = None
+        self.scene_note = ''
+        self.own_decision = None
+        self.diagnostic = False
+        self.diagnostics = None
+        self.video = None
+
+    def geometry(self, args):
+        height = number(args, 'height_m', None, .1, .8)
+        stamp = number(args, 'stamp', None, 0, 1e12)
+        with self.lock:
+            if not self.geometry_history or stamp > self.geometry_history[-1][0]:
+                self.geometry_history.append((stamp, height))
+        return {'accepted': True}
+
+    def football_pose(self, args):
+        from .football_vision import SceneTracker
+        with self.lock:
+            self.scene_pose = dict(args) if args.get('active') else None
+            self.scene_tracker = SceneTracker()
+            self.scene_note = str(args.get('note', ''))[:110]
+        return {'accepted': True}
+
+    def football_decision(self, args):
+        with self.lock:
+            self.own_decision = dict(blocks=args.get('blocks', [])[:4], received=time.monotonic())
+        return {'accepted': True}
+
+    def football_state(self):
+        with self.lock:
+            scene = self.scene_tracker.current
+            if not self.football or self.error or self.stop_event.is_set() or scene is None:
+                return {'valid': False, 'reason': self.error or 'no_support_scene'}
+            age = time.monotonic()-scene['received']
+            return dict(scene, valid=0 <= age <= .5, age_ms=round(age*1000))
 
     def state(self):
         with self.lock:
             age, result = self.tracker.state(time.monotonic())
-            return dict(running=bool(self.thread and self.thread.is_alive() and not self.stop_event.is_set() and not self.error),
-                        error=self.error, age_ms=age, result=result)
+            state = dict(running=bool(self.thread and self.thread.is_alive() and not self.stop_event.is_set() and not self.error),
+                         error=self.error, age_ms=age, result=result)
+            if self.diagnostic:
+                state['diagnostics'] = self.diagnostics
+            return state
 
     def apply_parameters(self, values):
         with self.lock:
@@ -147,6 +202,10 @@ class BallObservation:
                 self.parameters = updated
                 self.parameter_revision += 1
                 self.tracker.invalidate('parameters_changed')
+                self.diagnostics = None
+                self.scene_tracker.previous = self.scene_tracker.current = None
+                if self.diagnostic and self.video:
+                    self.video.invalidate()
 
     def start(self, args):
         if self.thread and self.thread.is_alive():
@@ -158,9 +217,14 @@ class BallObservation:
         if not isinstance(parameters, dict):
             raise Fault('invalid_argument', 'parameters must be an object')
         self.parameters = dict(parameters)
+        self.football = bool(args.get('football', False))
+        self.own_decision = None
+        self.football_pose({'active': False})
         self.stop_event = threading.Event()
         self.tracker = BallTracker()
         self.error = None
+        self.diagnostics = None
+        self.geometry_history.clear()
         self.thread = threading.Thread(target=self._run, args=(offset,), daemon=True)
         self.thread.start()
         return self.state()
@@ -239,16 +303,65 @@ class BallObservation:
                 image = np.frombuffer(data, np.uint8).reshape(650, 800, 3)
                 with self.lock:
                     parameters, revision = self.parameters, self.parameter_revision
-                candidates = ball_candidates(image, parameters, projector, imu[2:6])
+                    height = next((h for stamp, h in reversed(self.geometry_history) if stamp <= received), None)
+                    pose = self.scene_pose
+                began = time.monotonic_ns()
+                debug = {} if self.diagnostic else None
+                ticket = self.video.ticket() if self.diagnostic and self.video else None
+                candidates = ball_candidates(image, parameters, projector, imu[2:6], height, debug=debug)
+                scene = None
+                if self.football and pose and received >= pose['after']:
+                    from .football_vision import camera_geometry, plane_point, goal_parts
+                    geometry = camera_geometry(parameters, pose['pan'], pose['tilt'])
+                    # Use exactly the same blob centre as the normal detector.
+                    # A separate projection avoids transferring its old floor-height scale.
+                    selected = candidates[0] if candidates else None
+                    point = None
+                    if selected:
+                        pixel = selected['center_px']
+                        try:
+                            point = plane_point(projector, pixel, imu[2:6], geometry, parameters['game.ball_diameter_m']/2)
+                        except ValueError:
+                            pass
+                    parts = goal_parts(image, parameters, projector, imu[2:6], geometry,
+                                       bearing_only=pose.get('goal_bearing_only', False))
+                    for part in parts:
+                        part.update(frame_sequence=header[0], sensor_timestamp_ns=header[1],
+                                    pan=pose['pan'], tilt=pose['tilt'], parameter_revision=revision)
+                    scene = dict(pose_id=pose['pose_id'], sequence=header[0], stamp=header[1], parameter_revision=revision,
+                                 received=received, ball=point, parts=parts, height_m=geometry['height'],
+                                 ball_radius=parameters['game.ball_diameter_m']/2)
+                processing_us = (time.monotonic_ns()-began)//1000
                 with self.lock:
                     if not self.stop_event.is_set() and revision == self.parameter_revision:
-                        self.tracker.update(candidates, header[0], header[1], received, time.monotonic())
+                        result = self.tracker.update(candidates, header[0], header[1], received, time.monotonic())
+                        if scene is not None and pose is self.scene_pose:
+                            self.scene_tracker.update(scene)
+                        if debug is not None:
+                            self.diagnostics = dict(counts=debug['counts'], parameter_revision=revision,
+                                                    processing_us=processing_us)
+                            if ticket is not None:
+                                from .vision_diagnostics import render
+                                caption = f"Ball frame={header[0]} rev={revision} {result['reason']} {processing_us/1000:.1f}ms"
+                                if self.football:
+                                    from .football_vision import render_scene
+                                    output = render_scene(image, self.scene_tracker.current if pose is self.scene_pose else None,
+                                                          self.scene_note, [parameters[f'field.goal.{i}'] for i in (0, 1)],
+                                                          (parameters[f"field.goal.{parameters['match.own_goal']}"]['colour']
+                                                           if pose and pose.get('goal_veto_enabled', True) else None),
+                                                          self.own_decision)
+                                else:
+                                    output = render(image, debug['masks'], debug['objects'], caption)
+                                self.video.submit(ticket, header, output)
                 del image, data, pair
         except Exception as exc:
             with self.lock:
                 if not self.stop_event.is_set():
                     self.error = str(exc)[:200]
                     self.tracker.invalidate('error')
+                    self.diagnostics = None
+                    if self.diagnostic and self.video:
+                        self.video.invalidate()
         finally:
             guards.clear()
             waitset = None
@@ -259,6 +372,9 @@ class BallObservation:
         self.stop_event.set()
         with self.lock:
             self.tracker.invalidate('stopped')
+            self.diagnostics = None
+            if self.diagnostic and self.video:
+                self.video.invalidate()
         if self.thread:
             self.thread.join(2)
             if self.thread.is_alive():

@@ -23,7 +23,7 @@ def test_empty_frame_loses_pose_without_fabricated_measurement():
     assert result['reason']=='insufficient_observations'
 
 
-def test_candidate_never_valid_without_verified_geometry():
+def test_symmetric_white_map_cannot_establish_field_side():
     from roki_ng.localisation import PoseFilter
     from roki_ng.field_observations import field_model
     pose=np.array([-1.,-.5,.4]);c,s=np.cos(pose[2]),np.sin(pose[2])
@@ -32,7 +32,7 @@ def test_candidate_never_valid_without_verified_geometry():
     result=pf.update(1,lines,None)
     assert result['candidate'] is not None
     assert result['valid'] is False
-    assert 'calibration' in result['reason']
+    assert result['reason']=='ambiguous'
 
 
 def test_particle_count_and_prior_are_bounded():
@@ -151,10 +151,12 @@ def test_goal_posts_require_vertical_structure_and_nearby_turf():
     cv2.rectangle(image,(180,300),(360,310),(200,40,20),-1)
     cv2.rectangle(image,(500,30),(510,100),(0,220,240),-1) # Background object.
     found=goal_candidates(image)
-    assert len(found)==2
-    assert all(x['colour']=='blue' for x in found)
+    blue=[x for x in found if x['colour']=='blue']
+    assert len(blue)==2
     assert all(x['metric_valid'] is False for x in found)
-    assert np.allclose([x['foot_px'][1] for x in found],425,atol=3)
+    assert np.allclose([x['foot_px'][1] for x in blue],425,atol=3)
+    # A white-backed object may be discovered, but is not a metric landmark.
+    # Height and map association are performed after this image-only stage.
 
 
 def test_goal_detection_rejects_clipped_base():
@@ -237,11 +239,16 @@ def test_bounded_status_with_four_goals_fits_udp(tmp_path):
     worker=Localisation({'state_dir':'/tmp'},lambda *a:None,lambda *a:None)
     result=PoseFilter([0,0,0]).update(1,field_model(),None)
     result.pop('proposal_spread',None)
+    result.pop('ess',None)
+    result.pop('mode_mass',None)
     result.update(sensor_timestamp_ns=2**60,frame_sequence=2**32-1,imu_sequence=2**32-1,
                   processing_ms=99999,parameter_revision=2**32-1,goal_rejected=16,
+                  window_id='f'*32, detector_errors=['segmentation','projection','circle','lines'],
+                  timings_ms={k:999.9 for k in ('segmentation','projection','circle','lines','marks','posts','filter')},spots=12,
                   goal_candidates=[{'colour':'yellow','rect':[700,500,100,150],
                                     'foot_px':[799.,649.],'metric_valid':False}]*4)
     worker.result=result;worker.last_measurement=time.monotonic()
+    worker.game_mode=True
     worker.geometry=GEOMETRY;worker.configuration_id='f'*16;worker.capture_id='f'*32
     worker.frames=worker.dropped=2**32-1
     server=Supervisor({'state_dir':str(tmp_path)})
@@ -309,15 +316,15 @@ def test_ambiguous_mirrored_field_does_not_collapse_to_one_side():
     assert np.array_equal(pf.particles,before)
 
 
-def test_consistent_unambiguous_geometry_can_update_proposals():
+def test_concentrated_prior_does_not_hide_opposite_side_hypothesis():
     from roki_ng.localisation import PoseFilter
     from roki_ng.field_observations import field_model
     pf=PoseFilter([0,0,0],count=512)
     pf.particles[:]=0
     before=pf.particles.copy()
     result=pf.update(1,field_model(),None)
-    assert result['fit_state']=='matched'
-    assert not np.array_equal(pf.particles,before)
+    assert result['fit_state']=='ambiguous'
+    assert np.array_equal(pf.particles,before)
     assert result['valid'] is False
 
 
@@ -374,7 +381,7 @@ def test_coloured_goal_pair_breaks_symmetry_but_rejects_teleport():
     result=pf.update(1,lines,circle,[{'colour':'blue','bearings':angles,'ground_feet':(ends@rot).tolist()}],timestamp=10.)
     assert result['fit_state']=='matched'
     assert np.linalg.norm(np.asarray(result['candidate'])[:2]-pose[:2])<.15
-    assert result['goal_pairs']==1 and not result['valid']
+    assert result['goal_pairs']==1 and result['valid']
     before=pf.particles.copy();anchor=pf.anchor.copy()
     result=pf.update(2,lines,circle,[{'colour':'yellow','bearings':angles,'ground_feet':(ends@rot).tolist()}],timestamp=10.1)
     assert result['reason']=='motion_discontinuity'

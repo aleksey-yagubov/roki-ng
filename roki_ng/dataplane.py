@@ -6,12 +6,14 @@ from contextlib import contextmanager
 
 FRAME_TOPIC = "roki/camera/frame"
 LOCALISATION_TOPIC = "roki/localisation/frame"
+DETECTION_FRAME_TOPIC = "roki/detection/frame"
 IMU_TOPIC = "roki/motherboard/imu"
 DETECTIONS_TOPIC = "roki/detection/blobs"
 FRAME_HEADER = struct.Struct("<IQIII")  # Unicam u32, sensor ns, width, height, stride
 IMU_RECORD = struct.Struct("<IQffffI")  # STM sequence, Bosch sensor ns, quaternion xyzw, sensor ID
 FRAME_BYTES = FRAME_HEADER.size + 800 * 650 * 3
 TOPICS = {FRAME_TOPIC: (4, FRAME_BYTES), LOCALISATION_TOPIC: (4, FRAME_BYTES), IMU_TOPIC: (128, IMU_RECORD.size),
+          DETECTION_FRAME_TOPIC: (4, FRAME_BYTES),
           DETECTIONS_TOPIC: (4, 4096)}
 
 

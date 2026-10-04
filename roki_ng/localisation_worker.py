@@ -31,15 +31,23 @@ class Localisation:
         self.video_requested = threading.Event()
         self.video_frames = 0
         self.video_last_frame = 0.0
+        self.lock = threading.Lock()
+        self.game_mode = False
+        self.window = None
 
     def state(self):
-        result=dict(self.result) if self.result else None
-        age=round((time.monotonic()-self.last_measurement)*1000) if result else None
-        if result and age>1500:
+        with self.lock:
+            result=dict(self.result) if self.result else None
+            age=round((time.monotonic()-self.last_measurement)*1000) if result else None
+        if result and 'timings_ms' in result:
+            # Integer milliseconds bound status packets with four post candidates
+            # plus small-mark diagnostics; internal measurements retain precision.
+            result['timings_ms']={key:round(value) for key,value in result['timings_ms'].items()}
+        if result and (age<0 or age>500):
             result.update(valid=False,reason='stale')
         return {'state':'fault' if self.error else 'ready',
                 'running':self.thread is not None and self.thread.is_alive(),
-                'mode':'diagnostic_only', 'capture_id':self.capture_id,
+                'mode':'stationary_correction' if self.game_mode else 'visual_pose', 'capture_id':self.capture_id,
                 'frames':self.frames,'dropped':self.dropped,'age_ms':age,
                 'error':self.error,'result':result,
                 'configuration_id':self.configuration_id,'geometry':self.geometry}
@@ -58,6 +66,20 @@ class Localisation:
                             dependencies=('camera',))
 
     def command(self, op, args):
+        if op == 'localisation.window':
+            from .localisation import PoseFilter
+            window = args.get('window')
+            if not self.game_mode:
+                raise Fault('invalid_state', 'No game localisation session')
+            if window is not None:
+                if (not isinstance(window,dict) or not isinstance(window.get('id'),str)
+                        or type(window.get('after_ns')) is not int):
+                    raise Fault('invalid_argument', 'Invalid observation window')
+                PoseFilter(window.get('prior'), count=256, parameters=self.parameters)
+            with self.lock:
+                self.window = window
+                self.result = None
+            return {'window_id': window['id'] if window else None}
         if op in ('source.start', 'source.stop', 'source.status'):
             if op == 'source.start':
                 if args.get('parameters', {}) != {}:
@@ -78,7 +100,8 @@ class Localisation:
             from .parameters import validate_colour_ranges
             updated=self.parameters | args
             validate_colour_ranges(updated)
-            self.parameters=updated;self.parameter_revision+=1;self.result=None
+            with self.lock:
+                self.parameters=updated;self.parameter_revision+=1;self.result=None
             return {}
         if op in ('state','localisation.status'):
             return self.state()
@@ -117,6 +140,8 @@ class Localisation:
         self.video_last_frame = 0.0
         self.video_requested.clear()
         self.capture_id=args['capture_id']
+        self.game_mode = args.get('mode') == 'game'
+        self.window = None
         self.configuration_id=configuration
         self.geometry=dict(self.parameters['field.geometry'])
         self.thread=threading.Thread(target=self._run,args=(engine,projector,offset,self.generation),daemon=True)
@@ -130,8 +155,8 @@ class Localisation:
             import numpy as np
             from .dataplane import Channel,FRAME_TOPIC,IMU_TOPIC,FRAME_HEADER,IMU_RECORD,LOCALISATION_TOPIC,FRAME_BYTES
             from .synchronization import SequenceJoiner
-            from .field_observations import runtime_paint_mask,detect_circle,observations
-            from .goal_observations import goal_candidates,paired_bearings,mapped_candidates,upright_candidates
+            from .localisation_pipeline import process_frame
+            from .ball_observation import capture_time
             cv2.setNumThreads(1)
             channels=[Channel(FRAME_TOPIC),Channel(IMU_TOPIC)]
             iox=channels[0].iox
@@ -140,6 +165,7 @@ class Localisation:
             joiner=SequenceJoiner(capacity=128)
             joiner.set_alignment(offset)
             last_pair=time.monotonic();next_compute=0.
+            active_window = None
             while not self.stop_event.is_set():
                 waitset.wait_and_process()
                 pair=None
@@ -158,7 +184,8 @@ class Localisation:
                                 if rec[2:]!=(800,650,2400) or len(view)!=FRAME_HEADER.size+650*2400:
                                     raise ValueError('Invalid frame dimensions')
                                 owned=bytes(view[FRAME_HEADER.size:])
-                                matched=joiner.frame(rec[0],(rec,owned,time.monotonic()))
+                                captured=capture_time(rec[1],time.clock_gettime_ns(time.CLOCK_BOOTTIME),time.monotonic())
+                                matched=joiner.frame(rec[0],(rec,owned,captured))
                                 # Separate frame memory bound: max 2 copied BGR frames.
                                 while len(joiner.frames)>2:
                                     joiner.frames.popitem(last=False);self.dropped+=1
@@ -172,43 +199,38 @@ class Localisation:
                     continue
                 last_pair=now
                 (header,data,received),imu=pair
-                if now<next_compute or now-received>.5:
+                if now<next_compute or not 0<=now-received<=.5:
                     self.dropped+=1;continue
                 if header[0]<=engine.sequence:
                     self.dropped+=1;continue
                 started=now
                 image=np.frombuffer(data,np.uint8).reshape(650,800,3)
-                posts=[];lines=[];circle=None;raw_post_count=0
-                try:
+                with self.lock:
                     parameters=self.parameters;revision=self.parameter_revision
-                    white=runtime_paint_mask(image,parameters)
-                    paint=projector.project(white,imu[2:6])
-                    circle=detect_circle(paint,scale=.5)
-                    if circle:
-                        x,y,r=circle['pixel_circle'];yy,xx=np.indices(paint.shape)
-                        paint[np.abs(np.hypot(xx-x,yy-y)-r)<8]=0
-                    lines=observations(paint,scale=.5)[:32]
-                    posts=goal_candidates(image,parameters)
-                    raw_post_count=len(posts)
-                    posts=upright_candidates(posts,projector,imu[2:6],engine.goals,parameters['localisation.goal_height_tolerance_ratio'])
-                    bearings=paired_bearings(posts,projector,imu[2:6])
-                    result=engine.update(header[0],lines,circle,bearings,timestamp=header[1]/1e9)
-                except ValueError as exc:
-                    result={'valid':False,'candidate':None,'reason':str(exc)[:120],
-                            'frame_sequence':header[0]}
-                # Keep the bounded UDP state small; proposal spread is offline diagnostics.
-                result.pop('proposal_spread',None)
+                    window=self.window
+                if self.game_mode:
+                    if window is None or header[1]<=window['after_ns']:
+                        continue
+                    if active_window != window['id']:
+                        from .localisation import PoseFilter
+                        engine=PoseFilter(window['prior'],parameters=parameters,heading=window['prior'][2])
+                        active_window=window['id']
+                result,lines,circle,posts=process_frame(image,imu[2:6],projector,engine,parameters,header[0],header[1]/1e9)
+                spots=result.pop('_spot_observations',[])
                 result.update(sensor_timestamp_ns=header[1],imu_sequence=imu[0],
                               processing_ms=round((time.monotonic()-started)*1000))
-                posts=mapped_candidates(posts,projector,imu[2:6],result,engine.goals,engine.goal_foot_tolerance)
-                result['goal_rejected']=raw_post_count-len(posts)
-                result['goal_candidates']=posts
+                if self.game_mode:
+                    result['window_id']=active_window
                 result['parameter_revision']=revision
                 result['processing_ms']=round((time.monotonic()-started)*1000)
                 # Stop invalidates calculations already in flight.
                 if self.stop_event.is_set() or self.generation!=generation:break
-                if revision!=self.parameter_revision:continue
-                self.result=result;self.last_measurement=received;self.frames+=1
+                with self.lock:
+                    if self.stop_event.is_set() or self.generation!=generation:break
+                    if revision!=self.parameter_revision or window is not self.window:continue
+                    if time.monotonic()-received>.5:
+                        result.update(valid=False,reason='stale')
+                    self.result=result;self.last_measurement=received;self.frames+=1
                 if self.video_requested.is_set() and self.video_error is None:
                     try:
                         if debug_channel is None:
@@ -216,14 +238,17 @@ class Localisation:
                         # Stream's FrameReader exists only while video is requested.
                         if debug_channel.has_subscribers():
                             from .localisation_debug import video_frame
-                            annotated=video_frame(image,projector,imu[2:6],lines,circle,posts,result,engine.model,engine.circles)
+                            annotated=video_frame(image,projector,imu[2:6],lines,circle,posts,result,engine.model,engine.circles,spots=spots)
                             if self.stop_event.is_set() or self.generation!=generation:break
-                            if self.video_requested.is_set() and debug_channel.has_subscribers():
-                                with debug_channel.loan(FRAME_BYTES) as target:
-                                    FRAME_HEADER.pack_into(target,0,*header)
-                                    target[FRAME_HEADER.size:]=annotated.tobytes()
-                                self.video_frames += 1
-                                self.video_last_frame = time.monotonic()
+                            with self.lock:
+                                if revision!=self.parameter_revision or window is not self.window:continue
+                                if self.stop_event.is_set() or self.generation!=generation:break
+                                if self.video_requested.is_set() and debug_channel.has_subscribers():
+                                    with debug_channel.loan(FRAME_BYTES) as target:
+                                        FRAME_HEADER.pack_into(target,0,*header)
+                                        target[FRAME_HEADER.size:]=annotated.tobytes()
+                                    self.video_frames += 1
+                                    self.video_last_frame = time.monotonic()
                     except Exception as exc:
                         # A failed diagnostic sink must not stop pose estimation.
                         # Disable it until the next localisation.start, without a retry loop.
@@ -251,7 +276,9 @@ class Localisation:
         self.video_requested.clear()
         self.generation+=1
         self.stop_event.set()
-        self.result=None
+        with self.lock:
+            self.result=None
+            self.window=None
         if self.thread is not None:
             self.thread.join(2)
             if self.thread.is_alive():

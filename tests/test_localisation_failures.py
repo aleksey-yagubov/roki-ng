@@ -71,7 +71,8 @@ def test_localisation_continues_after_bad_frame_or_video_failure(tmp_path, monke
     if failure != 'not_requested':
         worker.video_requested.set()
     clock = [1.0]
-    monkeypatch.setattr(localisation_worker, 'time', NS(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(localisation_worker, 'time', NS(monotonic=lambda: clock[0],
+        CLOCK_BOOTTIME=7, clock_gettime_ns=lambda _: int(clock[0]*1e9)))
 
     class WaitSet:
         calls = 0
@@ -143,7 +144,7 @@ def test_localisation_continues_after_bad_frame_or_video_failure(tmp_path, monke
     monkeypatch.setattr(field_observations, 'detect_circle', lambda *a, **k: None)
     monkeypatch.setattr(field_observations, 'observations', lambda *a, **k: [])
 
-    def render(image, projector, quaternion, lines, circle, posts, result, *args):
+    def render(image, projector, quaternion, lines, circle, posts, result, *args, spots=None):
         rendered.append(result)
         if failure == 'render':
             raise RuntimeError('test render failure')
@@ -170,7 +171,7 @@ def test_localisation_continues_after_bad_frame_or_video_failure(tmp_path, monke
     worker.tick()
     worker.tick()
     if failure == 'frame':
-        assert 'after erosion' in rendered[0]['reason']
+        assert 'segmentation' in rendered[0]['detector_errors']
         assert published == [0, 1] and not logs
     elif failure in ('no_subscriber', 'not_requested'):
         assert not rendered and not published and not logs
