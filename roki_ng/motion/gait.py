@@ -159,7 +159,10 @@ class GaitAlgorithms:
         self.stepLength = stepLength + self.motion_shift_correction_x
         self.sideLength = sideLength - self.motion_shift_correction_y
         self.rotation = math.degrees(rotation)
-        if self.rotation <= 0:
+        # Switching the leading leg mirrors the physical turn. Calibration
+        # yields refer to the physical yaw direction, not the gait argument.
+        physical_rotation = self.rotation * (1 if self.first_Leg_Is_Right_Leg else -1)
+        if physical_rotation <= 0:
             rotation = -self.rotation / 222 * 0.23 / self.params['ROTATION_YIELD_RIGHT']
         else:
             rotation = -self.rotation / 222 * 0.23 / self.params['ROTATION_YIELD_LEFT']

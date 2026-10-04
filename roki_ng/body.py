@@ -13,18 +13,28 @@ import uuid
 from .motion.model import Robot
 from .wire import Fault, boolean, choice, number, page
 from .calibration import TestPlan, TITLES, MEASUREMENTS, describe
-from .calibration import quaternion_yaw, wrap
+from .calibration import wrap
 from .motion import slots
-from .body_imu import BodyImu
+from .body_imu import BodyImu, quaternion_yaw
 from .body_servos import BodyServos
 from .body_power import BodyPower
 from .stabilization import CrouchStabilizer
 from .stabilization_diagnostics import StabilizationDiagnostics
+from .controller_kick import KICK_SLOT, STOP_SLOT, KICK_PARAMETERS, KickWitness
 
 ASSETS = Path(__file__).with_name("assets")
 
 
+class BodyTransmissionError(Fault):
+    def __init__(self, message, count=1):
+        super().__init__("hardware_error", message)
+        self.count = count
+
+
 class RokiHardware:
+    forward_pending = False
+    controller_pending = False
+
     def __init__(self, config):
         import Roki
         self.Roki = Roki
@@ -42,28 +52,68 @@ class RokiHardware:
         self.body_failures = self.mb.GetStatus()["body_failures"]
 
     def probe(self):
-        self.check(self.rcb.checkAcknowledge(), self.rcb)
+        self._direct_available()
+        self.check(self.rcb.checkAcknowledge(), self.rcb, forwarded=True)
 
     def connect_body(self):
         # Flush pending host->body traffic before checking a reattached cable.
         self.reset()
+        self.check_queue()
         self.probe()
         self.body_failures = self.mb.GetStatus()["body_failures"]
 
+    def reconnect_motherboard(self):
+        # Reuse the client: its retired RPC IDs protect against late responses.
+        # Keep controller_pending until its STOP has actually been acknowledged.
+        self.check(self.mb.ConfigureACM(timeout_ms=1000), self.mb)
+        self.check(self.mb.StopStrobeCapture(), self.mb)
+        self.check(self.mb.ConfigureBody(200, 1), self.mb)
+        self.check(self.mb.SetBodyQueuePeriod(round(self.frame_s * 1000)), self.mb)
+        self.forward_pending = False
+        self.body_failures = self.mb.GetStatus()['body_failures']
+        self.mixing_started = False
+        self.check(self.mb.ResetBodyQueue(), self.mb)
+        self.busy_until = time.monotonic()
+        # connect_body() will stop a possibly running controller slot before
+        # acknowledging the body. A missing Zubr must not reboot healthy STM.
+
     def prepare_motion(self):
+        self._forward_available()
         if not self.mixing_started and not self.config.get("skip_mixing", False):
-            self.check(self.rcb.motionPlay(self.config.get("mixing_slot", 3)), self.rcb)
+            self._direct_available()
+            self.check(self.rcb.motionPlay(self.config.get("mixing_slot", 3)), self.rcb, forwarded=True)
             self.mixing_started = True
 
-    def check(self, ok, source):
+    def check(self, ok, source, forwarded=False):
         if not ok:
             # STM rejects a forward request while a queued transaction owns UART8.
             # No command was sent, and this does not mean the cable disconnected.
-            if self.mb.GetLastStatus() == 5:
+            status = self.mb.GetLastStatus()
+            if status == 5:
                 raise Fault("body_busy", source.GetError(), True)
+            if forwarded and status in (8, 9, 10):
+                # Firmware counts failed synchronous reads and queued movement
+                # in the same counter. Account for THIS transaction exactly
+                # once; never swallow other queued failures by copying GetStatus.
+                self.body_failures = (self.body_failures + 1) % (2**32)
+            elif forwarded and status == 255:
+                # Host lost the response; STM may still be executing this
+                # read/command. Resolve it before accepting another movement.
+                self.forward_pending = True
             raise Fault("hardware_error", source.GetError())
 
+    def _forward_available(self):
+        if self.forward_pending:
+            raise Fault("body_busy", "Previous direct transaction outcome pending", True)
+        if self.controller_pending:
+            raise Fault('body_busy', 'Controller kick completion/stop not confirmed', True)
+
+    def _direct_available(self):
+        if not self.telemetry_ready():
+            raise Fault("body_busy", "Direct transaction deferred while queue owns UART", True)
+
     def send(self, values, frames, pause):
+        self._forward_available()
         servos = []
         for value in values:
             servo = self.Roki.Rcb4.ServoData()
@@ -83,48 +133,141 @@ class RokiHardware:
         except RuntimeError as exc:
             raise Fault("hardware_error", f"Reading STM body status: {exc}") from exc
         previous = self.body_failures
+        if self.forward_pending:
+            if status["body_busy"]:
+                return status
+            self.forward_pending = False
+            # With no newly submitted movements, at most one increment belongs
+            # to the direct transaction already reported to its caller.
+            if status["body_failures"] != previous:
+                previous = self.body_failures = (previous + 1) % (2**32)
         self.body_failures = status["body_failures"]
         if self.body_failures != previous:
             # A later successful packet clears last_body_error, not this counter.
-            raise Fault("hardware_error", f"STM body transmission failures: {previous} -> "
-                        f"{self.body_failures}; last status {status['last_body_error']}")
+            delta = (self.body_failures - previous) % (2**32)
+            count = delta if delta < 2**31 else 1  # Firmware reboot, not billions of failures.
+            raise BodyTransmissionError(f"STM body transmission failures: {previous} -> "
+                                        f"{self.body_failures}; last status {status['last_body_error']}", count)
         return status
+
+    def telemetry_ready(self):
+        try:
+            status = self.mb.GetStatus()
+        except RuntimeError as exc:
+            raise Fault("hardware_error", f"Reading telemetry readiness: {exc}") from exc
+        # No direct read may overlap queued execution. Defer also when queue
+        # failures still need to be collected by the important-operation path.
+        return (not self.forward_pending and status["body_failures"] == self.body_failures
+                and status["body_queue_size"] == 0 and not status["body_busy"])
+
+    def _read_ram(self, address, size):
+        self._direct_available()
+        try:
+            ok, raw = self.rcb.moveRamToComCmdSynchronize(address, size)
+        except (RuntimeError, OSError) as exc:
+            self.forward_pending = True
+            raise Fault("hardware_error", f"Body RAM read failed: {exc}") from exc
+        self.check(ok, self.rcb, forwarded=True)
+        return raw
 
     def reset(self):
         self.check(self.mb.ResetBodyQueue(), self.mb)
         self.busy_until = time.monotonic()
+        if self.controller_pending:
+            # Clearing STM's queue cannot stop a script already running in Zubr.
+            # Keep the latch until STOP is acknowledged, including reconnects.
+            self.check_queue()  # Resolve an outstanding/lost direct response first.
+            self._direct_available()
+            self._controller_call(self.rcb, self.rcb.motionPlay, STOP_SLOT)
+            self.controller_pending = False
+            self.mixing_started = False
+
+    def _controller_call(self, source, method, *args):
+        try:
+            result = method(*args)
+        except (RuntimeError, OSError) as exc:
+            self.forward_pending = True
+            raise Fault('hardware_error', f'Controller transaction outcome unknown: {exc}') from exc
+        self.check(result[0] if isinstance(result, tuple) else result, source, forwarded=True)
+        return result
+
+    def controller_write(self, address, value):
+        self._direct_available()
+        if not hasattr(self, 'zubr'):
+            self.zubr = self.Roki.Zubr(self.mb)
+        self._controller_call(self.zubr, self.zubr.memISet, address, value)
+
+    def controller_read(self, address):
+        self._direct_available()
+        ok, value = self._controller_call(self.zubr, self.zubr.memIGet, address)
+        return value
+
+    def controller_start(self):
+        self._direct_available()
+        # A lost ACK may mean the kick DID start. Never replay it.
+        self.controller_pending = True
+        try:
+            self._controller_call(self.rcb, self.rcb.motionPlay, KICK_SLOT)
+        except Fault as exc:
+            if exc.code == 'body_busy':
+                # STM explicitly rejected forwarding; no slot was started.
+                self.controller_pending = False
+            raise
+
+    def controller_completed(self):
+        self.controller_pending = False
+        self.mixing_started = self.config.get('mixing_slot', 3) == 3
 
     def head(self, values, frames):
+        self._direct_available()
         servos = []
         for value in values:
             servo = self.Roki.Rcb4.ServoData()
             servo.Id, servo.Sio, servo.Data = value.Id, value.Sio, value.Data
             servos.append(servo)
-        self.check(self.rcb.setServoPos(servos, frames), self.rcb)
+        self.check(self.rcb.setServoPos(servos, frames), self.rcb, forwarded=True)
 
     def body_quaternion(self):
-        ok, raw = self.rcb.moveRamToComCmdSynchronize(0x0060, 8)
-        self.check(ok, self.rcb)
+        raw = self._read_ram(0x0060, 8)
         if len(raw) != 8:
             raise Fault("imu_invalid", "Body IMU response must contain 8 bytes")
         return tuple(value / 16384 for value in struct.unpack("<hhhh", bytes(raw)))
 
     def body_positions(self):
-        ok, raw = self.rcb.moveRamToComCmdSynchronize(0x0070, 60)
-        self.check(ok, self.rcb)
+        raw = self._read_ram(0x0070, 60)
         if len(raw) != 60:
             raise Fault("servo_data_invalid", "Body positions response must contain 60 bytes")
         return struct.unpack("<30h", bytes(raw))
 
     def body_power_adc(self):
-        ok, raw = self.rcb.moveRamToComCmdSynchronize(0x00CC, 2)
-        self.check(ok, self.rcb)
+        raw = self._read_ram(0x00CC, 2)
         if len(raw) != 2:
             raise Fault("power_data_invalid", "Body power response must contain 2 bytes")
         return struct.unpack("<H", bytes(raw))[0]
 
 
 class SimHardware:
+    controller_pending = False
+
+    def controller_write(self, address, value):
+        pass
+
+    def controller_start(self):
+        self.controller_pending = True
+        self.controller_reads = 0
+
+    def controller_read(self, address):
+        self.controller_reads += 1
+        values = ({18: 2, 16: KickWitness.ROTATION_BITS, 2: 0, 3: 0}
+                  if self.controller_reads <= 5 else {18: 0, 16: 0, 2: 100, 3: 100})
+        return values[address]
+
+    def controller_completed(self):
+        self.controller_pending = False
+
+    def telemetry_ready(self):
+        return True
+
     def body_power_adc(self):
         return 3242
 
@@ -160,6 +303,7 @@ class SimHardware:
     def reset(self):
         self.resets += 1
         self.busy_until = 0
+        self.controller_pending = False
 
     def head(self, values, frames):
         self.sent += 1
@@ -183,8 +327,15 @@ class Body:
         self.imu_published = 0
         self.imu_rpc_errors = 0
         self.reconnect_at = 0
+        self.motherboard_reset_pending = False
         self.retry_delay = 1.0
         self.probe_successes = 0
+        self.important_errors = collections.deque(maxlen=3)
+        self.last_important_error = None
+        self.queue_reset_pending = False
+        self.queue_reset_at = 0
+        self.fall_sequence = 0
+        self.fall_samples = 0
         self.recovery_active = False
         self.model = Robot()
         self.hip_limits = {(servo, bus): sorted((7500 + low * sign, 7500 + high * sign))
@@ -214,10 +365,12 @@ class Body:
         self.jobs = collections.OrderedDict()
         self.calibration_pending = None
         self.drive = None
+        self.drive_rearm_required = False
         self.drive_deadline = 0
         self.stop_requested = False
         self.next_at = 0
         self.instruction = None
+        self.segment_active = False
         self.instruction_started = 0
         self.head = {"pan": 0, "tilt": 0}
         self.slots = sorted(p.stem for p in (ASSETS / "slots").glob("*.json"))
@@ -225,6 +378,7 @@ class Body:
         self.log("INFO", "Motherboard ready; body connection checked separately; camera remains off")
 
     def state(self):
+        body_imu = self.body_imu.state(time.monotonic())
         return {"state": "degraded" if not self.body_connected else "fault" if self.error else "ready", "pose": self.pose,
                 "body_connected": self.body_connected,
                 "recovering": self.recovery_active,
@@ -234,6 +388,10 @@ class Body:
                 "imu_error": self.imu_error,
                 "imu_rpc_errors": self.imu.total_errors if self.imu else self.imu_rpc_errors,
                 "active_job": self.active, "head": self.head, "error": self.error,
+                "important_errors_5s": self._important_error_count(),
+                "last_important_error": self.last_important_error,
+                "queue_reset_pending": self.queue_reset_pending,
+                "body_imu": {key: body_imu[key] for key in ("valid", "sequence", "source_mono_ns")},
                 "simulated": self.simulated}
 
     def _engine(self):
@@ -243,16 +401,33 @@ class Body:
         return self.engine
 
     def command(self, op, args):
+        # Nested commands (takeover -> stop) must not count the same failed
+        # transaction twice. Each top-level call is a distinct attempt.
+        nested = getattr(self, "in_command", False)
+        self.in_command = True
         try:
             return self._command(op, args)
         except (Fault, OSError) as exc:
             if op.startswith("imu."):
                 self.imu_error = str(exc)[:240]
-            elif isinstance(exc, OSError) or exc.code == "hardware_error":
-                self._link_lost(exc)
+                self.log("WARNING", f"{op} failed: {exc}")
+            elif not nested and (isinstance(exc, OSError) or exc.code == "hardware_error"):
+                self._important_failure(exc)
+            elif not nested:
+                self.log("WARNING", f"{op} rejected: {exc}")
             raise
+        finally:
+            self.in_command = nested
 
     def _command(self, op, args):
+        if op == 'motherboard.reconnect':
+            if not self.motherboard_reset_pending:
+                raise Fault('invalid_state', 'No motherboard reset pending')
+            self.hardware.reconnect_motherboard()
+            self.motherboard_reset_pending = False
+            self.probe_successes = 0
+            self.reconnect_at = 0
+            return self.state()
         if op == "body.telemetry.watch":
             self.telemetry_watch = boolean(args, "enabled", False)
             self.servo_watch = self.telemetry_watch and boolean(args, "servos", False)
@@ -261,17 +436,16 @@ class Body:
             self.telemetry_at = 0
             return {}
         if op == "body.telemetry.read":
+            power, servos = boolean(args, "power", False), boolean(args, "servos", False)
             if self.body_connected:
                 try:
-                    if boolean(args, "power", False):
+                    if power:
                         self.body_power.read(self.hardware)
-                    elif boolean(args, "servos", False):
+                    elif servos:
                         self.body_servos.read(self)
-                    else:
-                        self.read_body_quaternion(max_age=0.02)
-                except Fault as exc:
-                    if exc.code not in ("body_busy", "imu_invalid", "servo_data_invalid", "power_data_invalid"):
-                        raise
+                    # IMU snapshots never initiate a hardware transaction.
+                except (Fault, OSError) as exc:
+                    self.log("WARNING", f"Body telemetry read failed: {exc}")
             return self._body_telemetry()
         if op == "control.takeover":
             self.control = False
@@ -315,14 +489,24 @@ class Body:
             if error is None:
                 self.parameters.update(job["calibration"])
                 self.engine = None
-            job.update(status="failed" if error else "completed", reason=error, saved=error is None)
+            job['saved'] = error is None
             self.calibration_pending = None
-            self.emit("job.failed" if error else "job.completed", dict(job))
+            if self.active == ident:
+                if error:
+                    self._finish('failed', error)
+                else:
+                    job.update(status='running', stage='calibration_saved', reason=None)
+                    self.emit('job.progress', dict(job))
+            else:
+                # Cancellation/fall during disk I/O must never restart the plan.
+                if job['status'] == 'saving':
+                    job.update(status='failed' if error else 'completed', reason=error)
+                self.emit('job.failed' if job['status'] == 'failed' else 'job.completed', dict(job))
             return dict(job)
         if self.calibration_pending and op in (
                 "control.acquire", "params.apply", "test.start", "motion.pose", "motion.drive",
                 "motion.jump", "motion.slot", "motion.kick", "motion.head",
-                "motion.get_up", "motion.splits"):
+                "motion.get_up", "motion.splits", "game.walk", "game.jump", "game.head"):
             raise Fault("busy", "Calibration parameters are being saved", True)
         if op == "control.acquire":
             if self.active:
@@ -362,8 +546,19 @@ class Body:
             job = self.jobs.get(args.get("job_id"))
             if job is None:
                 raise Fault("not_found", "Job no longer retained")
+            if job['operation'] == 'game.walk':
+                from .game_geometry import camera_height
+                height = self.parameters['game.camera_height_m']
+                if self.active == job['job_id'] and self.body_imu.fresh(time.monotonic()):
+                    height = camera_height(self.parameters, self.model, self.engine,
+                                           self.body_imu.pitch, self.body_imu.roll,
+                                           self.head['pan'], self.head['tilt'])
+                return job | {'camera_geometry': {'height_m': height, 'stamp': time.monotonic()}}
             return job
         if op == "motion.stop_hard":
+            controller_stop = self.hardware.controller_pending
+            if controller_stop and self.active:
+                self.jobs[self.active]['execution_uncertain'] = True
             self.drive = None
             self.plan = self.instruction = None
             self.pose = "unknown"
@@ -376,20 +571,25 @@ class Body:
             try:
                 self.hardware.reset()
             except Exception as exc:
-                self.error = str(exc)
-                self._finish("failed", self.error)
+                self.error = None if isinstance(exc, Fault) and exc.code == 'body_busy' else str(exc)
+                self.queue_reset_pending = True
+                self.queue_reset_at = time.monotonic() + .05
+                self._finish("failed", str(exc))
                 raise
             self._finish("cancelled", "hard_stop")
             if self.body_connected:
                 self.error = None
-            return {"stopped": True, "pose": "unknown", "scope": "host_body_queue",
+            return {"stopped": True, "pose": "unknown", "scope": "host_body_queue_and_controller" if controller_stop else "host_body_queue",
                     "body_connected": self.body_connected}
         if op in ("motion.stop_graceful", "job.cancel"):
             if op == "job.cancel" and args.get("job_id") != self.active:
                 raise Fault("not_found", "Job is not active")
             if self.recovery_active:
                 return self.command("motion.stop_hard", {})
-            if self.active and self.jobs[self.active]["operation"] not in ("motion.drive", "test.start", "game.step"):
+            if self.active and self.jobs[self.active].get('kick_type') == 'controller':
+                self.stop_requested = True
+                return {"accepted": True, "job_id": self.active}
+            if self.active and self.jobs[self.active]["operation"] not in ("motion.drive", "test.start", "game.walk", "game.jump"):
                 raise Fault("not_supported", "This motion requires hard stop or completion")
             self.stop_requested = True
             self.drive = None
@@ -402,6 +602,10 @@ class Body:
             raise Fault("not_owner", "Motion control has been released")
         if not self.body_connected:
             raise Fault("body_unavailable", "Body disconnected; reconnect pending", True)
+        if self.queue_reset_pending:
+            raise Fault("body_unavailable", "Body queue reset not confirmed", True)
+        if self.error:
+            raise Fault("motion_fault", self.error)
         if op == "motion.head":
             if self.recovery_active:
                 raise Fault("busy", "Get-up sequence owns the head", True)
@@ -425,6 +629,10 @@ class Body:
             drive["crouch"] = choice(args, "crouch", "off", ("off", "on", "centered"))
             drive["heading_hold"] = boolean(args, "heading_hold", False)
             active = any(abs(drive[a]) > 0.05 for a in ("x", "y", "yaw"))
+            if not active:
+                self.drive_rearm_required = False
+            elif self.drive_rearm_required:
+                raise Fault('not_ready', 'Release walking controls before restarting after a fall or lost IMU')
             if self.active and self.jobs[self.active]["operation"] != "motion.drive":
                 raise Fault("busy", "One-shot motion running", True)
             if self.stop_requested and self.active:
@@ -433,18 +641,41 @@ class Body:
             if active and not self.active:
                 return self._start(op, self._walk())
             return {"accepted": True, "job_id": self.active}
+        if op == 'game.observe':
+            if not self.active or args.get('job_id') != self.active or self.jobs[self.active]['operation'] != 'game.walk':
+                return {'accepted': False}  # Feedback may race job completion.
+            stamp = number(args, 'stamp', None, 0, 1e12)
+            if not 0 <= time.monotonic()-stamp <= .5:
+                return {'accepted': False}
+            ball = (number(args, 'x_m', None, -4, 4), number(args, 'y_m', None, -4, 4))
+            if stamp > getattr(self, 'game_ball_stamp', 0):
+                self.game_ball, self.game_ball_stamp = ball, stamp
+            return {'accepted': True}
         if self.active:
             raise Fault("busy", "Motion already running; command discarded", True)
-        if self.error:
-            raise Fault("motion_fault", self.error)
-        if op == "game.step":
-            direction = choice(args, "direction", None, ("left", "right"))
-            heading = number(args, "heading", None, -math.pi, math.pi)
-            side = number(args, "side_mm", 10., 1., 10.)
-            cycles = number(args, "cycles", 1, 1, 2, True)
-            if self.pose != "crouch":
-                raise Fault("invalid_state", "Goalkeeper step requires prepared crouch")
-            return self._start(op, self._game_step(direction, heading, side, cycles))
+        if op == 'game.walk':
+            if self.pose != 'base_stand':
+                raise Fault('invalid_state', 'Game walking requires base_stand')
+            kind = choice(args, 'kind', None, ('omni', 'approach', 'around', 'verify', 'kickoff'))
+            options = {key: number(args, key, default, low, high) for key, default, low, high in (
+                ('distance_m', 0., -4., 4.), ('course', 0., -math.pi, math.pi),
+                ('heading', 0., -math.pi, math.pi), ('initial_heading', 0., -math.pi, math.pi),
+                ('yaw_offset', 0., -math.pi, math.pi), ('kick_heading', 0., -math.pi, math.pi),
+                ('x_m', 0., -4., 4.), ('y_m', 0., -4., 4.))}
+            options['invert'] = number(args, 'invert', 1, -1, 1, True)
+            if options['invert'] not in (-1, 1):
+                raise Fault('invalid_argument', 'Kickoff direction must be -1 or 1')
+            self.game_ball = (options['x_m'], options['y_m'])
+            self.game_ball_stamp = number(args, 'stamp', 0., 0., 1e12)
+            return self._start(op, self._game_walk(kind, options), {'segments': [], 'execution_uncertain': False})
+        if op == "game.jump":
+            direction = choice(args, "direction", None, tuple(self.jumps) + ("turn_left", "turn_right"))
+            fraction = number(args, "fraction", 1., .1, 1.)
+            return self._start(op, self._game_jump(direction, fraction), {"segments": [], "execution_uncertain": False})
+        if op == "game.head":
+            pan = number(args, 'pan', 0, -2666, 2666, True)
+            tilt = number(args, 'tilt', None, -2600, 950, True)
+            return self._start(op, self._head(pan, tilt))
         if op == "motion.pose":
             name = choice(args, "name", None, ("base_stand", "crouch", "stand", "head_field"))
             if name == "crouch" and choice(args, "crouch", "on", ("on", "centered")) == "centered":
@@ -485,13 +716,17 @@ class Body:
             return self._start(op, self._splits(kind, crouch))
         if op == "motion.kick":
             leg = choice(args, "leg", "right", ("right", "left"))
-            power = number(args, "power", 80, 1, 100, True)
+            kick_type = self.parameters['motion.kick_type']
+            power = number(args, "power", 80, 20 if kick_type == 'controller' else 1, 100, True)
             offset = number(args, "offset", 0, -60, 80, True)
-            return self._start(op, self._kick(leg, power, offset))
+            return self._start(op, self._kick(leg, power, offset, kick_type),
+                               {'kick_type': kick_type, 'execution_uncertain': False})
         if op == "test.start":
             plan = TestPlan(self, args)
             return self._start(op, plan.run(), {"test": plan.args,
-                               "manual_parameters": list(MEASUREMENTS.get(plan.name, ()))})
+                               "manual_parameters": list(MEASUREMENTS.get(plan.name, ())),
+                               "measurement_baseline": {key: plan.parameters[key]
+                                   for key in MEASUREMENTS["spot_run"]} if plan.name == "spot_run" else {}})
         raise Fault("not_supported", op)
 
     def _start(self, op, plan, details=None):
@@ -499,8 +734,12 @@ class Body:
         if op == "test.start":
             self.engine = None
             self.pose = "unknown"
+        if op in ('test.start', 'motion.drive', 'motion.kick') or op.startswith('game.'):
+            self.fall_samples = 0
+            self.fall_sequence = self.body_imu.sequence
         ident = uuid.uuid4().hex
         self.active, self.plan = ident, iter(plan)
+        self.segment_active = False
         self.stop_requested = False
         self.next_at, self.instruction = 0, None
         self.jobs[ident] = {"job_id": ident, "operation": op, "status": "running", "progress": 0}
@@ -513,20 +752,31 @@ class Body:
     def _finish(self, status, reason=None):
         if self.active:
             job = self.jobs[self.active]
-            if job["operation"] == "test.start" and self.stop_requested and status == "completed":
+            if job["operation"] in ("test.start", "game.walk", "game.jump") and self.stop_requested and status == "completed":
                 status, reason = "cancelled", "graceful_stop"
+            if "segments" in job and self.segment_active:
+                job["execution_uncertain"] = True
+            if job.get('kick_type') == 'controller' and status != 'completed' and self.hardware.controller_pending:
+                job['execution_uncertain'] = True
+            if job.get('kick_type') == 'controller' and self.stop_requested and status == 'completed':
+                status, reason = 'cancelled', 'graceful_stop'
             job.update(status=status, reason=reason, pose=self.pose)
-            if status == "completed" and job.get("calibration"):
+            if status == "completed" and job.get("calibration") and not job.get('saved') and self.calibration_pending != self.active:
                 job["status"] = "saving"
                 self.calibration_pending = self.active
                 self.emit("calibration.ready", {"job_id": self.active, "values": job["calibration"]})
             else:
-                job.pop("calibration", None)
+                if not job.get('saved') and self.calibration_pending != self.active:
+                    job.pop("calibration", None)
                 self.emit("job.failed" if status == "failed" else "job.completed", dict(job))
         self.active = self.plan = self.instruction = None
+        self.segment_active = False
         self.stop_requested = False
 
     def tick(self):
+        if self.motherboard_reset_pending:
+            self._publish_body_telemetry()
+            return
         if self.imu:
             try:
                 self.imu.tick()
@@ -552,16 +802,38 @@ class Body:
                         return
                     self.body_connected = True
                     self.error = None
+                    self.important_errors.clear()
+                    self.queue_reset_pending = False
                     self.retry_delay = 1.0
                     self.log("INFO", "Body connected; no previous motion resumed")
                     self.emit("body.connection", self.state())
             except (Fault, OSError) as exc:
                 if isinstance(exc, Fault) and exc.code == "body_busy":
+                    self.log("WARNING", f"Body probe deferred: {exc}")
                     self.reconnect_at = time.monotonic() + 0.05
+                else:
+                    self._important_failure(exc)
                     return
-                self._link_lost(exc)
-                return
         if not self.body_connected:
+            self._publish_body_telemetry()
+            return
+        if self.queue_reset_pending:
+            if now >= self.queue_reset_at:
+                try:
+                    self.hardware.reset()
+                    self.queue_reset_pending = False
+                except (Fault, OSError) as exc:
+                    self.queue_reset_at = time.monotonic() + 0.05
+                    if isinstance(exc, Fault) and exc.code == 'body_busy':
+                        self.log('WARNING', f'Body stop deferred until direct transaction resolves: {exc}')
+                    else:
+                        self._important_failure(exc, reset=False)
+            return
+        try:
+            # Read queued execution failures even when the last job has ended.
+            self.hardware.check_queue()
+        except (Fault, OSError) as exc:
+            self._important_failure(exc)
             self._publish_body_telemetry()
             return
         self._tick_body_imu()
@@ -575,14 +847,23 @@ class Body:
             return
         self.stabilizer.freeze("motion")
         try:
-            self.hardware.check_queue()
+            self._monitor_motion_posture()
             if time.monotonic() < self.next_at:
                 return
             if self.instruction is None:
                 self.instruction = next(self.plan)
                 self.instruction_started = time.monotonic()
             kind, *args = self.instruction
-            if kind == "drain":
+            if kind == "imu":
+                after = args[0]
+                ready = (self.body_imu.fresh(time.monotonic())
+                         and (after is None or self.body_imu.sequence > after))
+                if not ready and not self.stop_requested:
+                    if time.monotonic() - self.instruction_started > 1:
+                        raise Fault("imu_stale", "No fresh polled body IMU within 1 second")
+                    self.next_at = time.monotonic() + 0.005
+                    return
+            elif kind == "drain":
                 if not self.hardware.drained():
                     if time.monotonic() - self.instruction_started > 3:
                         raise Fault("hardware_error", "Body queue did not drain within 3 seconds")
@@ -596,34 +877,103 @@ class Body:
                     raise Fault("invalid_motion", "Servo position outside protocol range")
                 self._send_targets(values, frames, pause)
                 self.next_at = time.monotonic() + self.hardware.frame_s * (pause + 1)
+            elif kind == 'controller_write':
+                self.hardware.controller_write(*args)
+            elif kind == 'controller_start':
+                if not self.stop_requested:
+                    self.hardware.controller_start()
+            elif kind == 'controller_wait':
+                witness = args[0]
+                if time.monotonic() - self.instruction_started > 10:
+                    raise Fault('hardware_error', 'Controller kick completion not confirmed within 10 seconds')
+                try:
+                    complete = witness.poll(self.hardware)
+                except (Fault, OSError) as exc:
+                    if isinstance(exc, Fault) and exc.code not in ('body_busy', 'hardware_error'):
+                        raise
+                    # Read-only telemetry is not an important motion failure.
+                    self.log('WARNING', f'Controller kick status unavailable: {exc}')
+                    witness.values = []
+                    complete = False
+                if not complete:
+                    self.next_at = time.monotonic() + .02
+                    return
+                self.hardware.controller_completed()
             elif kind == "sleep":
                 self.next_at = time.monotonic() + max(0, args[0])
             self.instruction = None
         except StopIteration:
             self._finish("completed")
         except Exception as exc:
+            if isinstance(exc, Fault) and exc.code == "body_busy" and self.instruction is not None:
+                self.log("WARNING", f"Body command deferred before execution: {exc}")
+                self.next_at = time.monotonic() + 0.02
+                return
             if isinstance(exc, OSError) or isinstance(exc, Fault) and exc.code == "hardware_error":
-                self._link_lost(exc)
+                self._important_failure(exc)
                 return
             self.pose = "unknown"
+            if self.active and self.jobs[self.active]['operation'] == 'motion.drive':
+                self.drive = None
+                self.drive_rearm_required = True
             self.engine = None
             self.servo_targets.clear()
             self.sent_targets.clear()
             self.target_times.clear()
             self.body_servos.invalidate("motion_fault")
             self.stabilizer.reset("motion_fault")
-            self.error = str(exc)
+            # Sensor/calibration/recovery failures fail the job, not the body
+            # connection. In particular a failed get-up must remain retryable.
+            retryable = isinstance(exc, Fault) and exc.code in (
+                "imu_stale", "imu_discontinuous", "imu_invalid", "calibration_invalid",
+                "course_not_reached", "posture_uncertain", "posture_unstable", "get_up_failed", "fallen")
+            self.error = None if retryable else str(exc)
+            self.log("ERROR", str(exc))
+            self._finish("failed", str(exc))
             try:
                 self.hardware.reset()
             except Exception as reset_error:
-                self.error += f"; reset failed: {reset_error}"
-            self.log("ERROR", self.error)
-            self._finish("failed", self.error)
+                if isinstance(reset_error, Fault) and reset_error.code == 'body_busy':
+                    self.log('WARNING', f'Body stop deferred until direct transaction resolves: {reset_error}')
+                    self.queue_reset_pending = True
+                    self.queue_reset_at = time.monotonic() + .05
+                else:
+                    self._important_failure(reset_error, reset=False)
         finally:
             self._publish_body_telemetry()
 
-    def read_body_quaternion(self, max_age=0.0):
-        return self.body_imu.read(self.hardware, max_age=max_age)
+    def read_body_quaternion(self, max_age=BodyImu.MAX_AGE_S):
+        return self.body_imu.sample(max_age)
+
+    def wait_for_imu(self, after_sequence=None):
+        if self.stop_requested:
+            return False
+        yield "imu", self.body_imu.sequence if after_sequence is None else after_sequence
+        return not self.stop_requested
+
+    def _monitor_motion_posture(self):
+        from .recovery import body_position
+        job = self.jobs[self.active]
+        manual = job['operation'] == 'motion.drive'
+        if (job.get('kick_type') == 'controller' and self.hardware.controller_pending
+                and not self.body_imu.fresh(time.monotonic())):
+            raise Fault('imu_stale', 'Body IMU lost during controller kick')
+        if manual and job.get('posture_verified') and not self.body_imu.fresh(time.monotonic()):
+            raise Fault('imu_stale', 'Body IMU lost during manual walking; release controls to restart')
+        if (not (manual or job.get('kick_type') == 'controller' or job["operation"].startswith('game.') or
+                 job["operation"] == "test.start" and job.get("posture_verified"))
+                or self.recovery_active or self.body_imu.sequence == self.fall_sequence
+                or not self.body_imu.fresh(time.monotonic())):
+            return
+        self.fall_sequence = self.body_imu.sequence
+        try:
+            position = body_position(self.body_imu.sample())
+        except Fault:
+            self.fall_samples = 0
+            return
+        self.fall_samples = self.fall_samples + 1 if position != "upright" else 0
+        if self.fall_samples >= 2:
+            raise Fault("fallen", f"Body fell {position}; motion cancelled")
 
     def _body_telemetry(self):
         now = time.monotonic()
@@ -646,29 +996,23 @@ class Body:
                      f"correction={self.stabilizer.offset_deg:.3f} deg")
             self.stabilization_log_at = now + 1
         self.stabilization_warning = warning
-        if self.telemetry_watch and now >= self.telemetry_at:
+        # Supervisor/game consumes the same cache even with no GUI subscriber.
+        if now >= self.telemetry_at:
             self.telemetry_at = now + 0.1
             self.emit("body.telemetry", self._body_telemetry())
 
     def _tick_body_imu(self):
-        if not (self.imu_watch or self.parameters["body_imu.poll_enabled"]
-                or self.parameters["stabilization.diagnostics_enabled"]
-                or self.parameters["stabilization.enabled"]):
-            return
         now = time.monotonic()
         # Servo deadlines take precedence. No backlog of missed polling periods.
-        if now < self.body_imu.next_at or (self.plan and now >= self.next_at):
+        if now < self.body_imu.next_at or (self.instruction is not None
+                and self.instruction[0] == "servo" and now >= self.next_at):
             return
         try:
-            self.read_body_quaternion()
-        except Fault as exc:
-            if exc.code == "imu_invalid":
-                if self.body_imu.invalid == 1 or self.body_imu.invalid % 50 == 0:
-                    self.log("WARNING", f"Body IMU rejected: {exc}")
-            elif exc.code != "body_busy":
-                self._link_lost(exc)
-        except OSError as exc:
-            self._link_lost(exc)
+            self.body_imu.next_at = now + BodyImu.PERIOD_S
+            if self.hardware.telemetry_ready():
+                self.body_imu.poll(self.hardware)
+        except (Fault, OSError) as exc:
+            self.log("WARNING", f"Body IMU polling failed: {exc}")
 
     def _send_targets(self, values, frames, pause):
         offsets = self.stabilizer.ticks(self.stabilizer.offset_deg)
@@ -696,15 +1040,11 @@ class Body:
                 or (self.plan and now >= self.next_at)):
             return
         try:
-            self.body_servos.read(self)
-        except Fault as exc:
-            if exc.code == "servo_data_invalid":
-                if self.body_servos.invalid == 1 or self.body_servos.invalid % 25 == 0:
-                    self.log("WARNING", f"Body positions rejected: {exc}")
-            elif exc.code != "body_busy":
-                self._link_lost(exc)
-        except OSError as exc:
-            self._link_lost(exc)
+            self.body_servos.next_at = now + BodyServos.PERIOD_S
+            if self.hardware.telemetry_ready():
+                self.body_servos.read(self)
+        except (Fault, OSError) as exc:
+            self.log("WARNING", f"Body positions polling failed: {exc}")
 
     def _tick_body_power(self):
         now = time.monotonic()
@@ -713,15 +1053,11 @@ class Body:
                 or (self.plan and now >= self.next_at)):
             return
         try:
-            self.body_power.read(self.hardware)
-        except Fault as exc:
-            if exc.code == "power_data_invalid":
-                if self.body_power.invalid == 1 or self.body_power.invalid % 25 == 0:
-                    self.log("WARNING", f"Body power rejected: {exc}")
-            elif exc.code != "body_busy":
-                self._link_lost(exc)
-        except OSError as exc:
-            self._link_lost(exc)
+            self.body_power.next_at = now + BodyPower.PERIOD_S
+            if self.hardware.telemetry_ready():
+                self.body_power.read(self.hardware)
+        except (Fault, OSError) as exc:
+            self.log("WARNING", f"Body power polling failed: {exc}")
 
     def _release_stabilization(self):
         # An absolute trajectory owns its next interpolated target. Do not send a
@@ -769,9 +1105,50 @@ class Body:
             regulator.commit(proposed)
         except (Fault, OSError) as exc:
             if isinstance(exc, Fault) and exc.code == "body_busy":
+                self.log("WARNING", f"Stabilization deferred: {exc}")
                 regulator.freeze("queue_busy")
             else:
-                self._link_lost(exc)
+                self._important_failure(exc)
+
+    def _important_error_count(self):
+        cutoff = time.monotonic() - 5
+        while self.important_errors and self.important_errors[0] <= cutoff:
+            self.important_errors.popleft()
+        return len(self.important_errors)
+
+    def _important_failure(self, exc, *, reset=True):
+        count = min(3, getattr(exc, "count", 1))
+        self._important_error_count()
+        self.important_errors.extend([time.monotonic()] * count)
+        self.last_important_error = str(exc)[:240]
+        self.log("ERROR", f"Important body operation failed ({len(self.important_errors)}/3 in 5s): {exc}")
+        if not self.body_connected or len(self.important_errors) >= 3:
+            self._link_lost(exc)
+            return
+        # An uncertain command must never be retried. End this job and discard
+        # its queued tail, but keep the worker/link usable below the threshold.
+        self.pose, self.drive, self.engine = "unknown", None, None
+        self.servo_targets.clear()
+        self.sent_targets.clear()
+        self.target_times.clear()
+        self.body_servos.invalidate("uncertain_motion")
+        self.stabilizer.reset("uncertain_motion")
+        self._finish("failed", str(exc))
+        if reset:
+            try:
+                self.hardware.reset()
+                self.queue_reset_pending = False
+            except (Fault, OSError) as reset_error:
+                if isinstance(reset_error, Fault) and reset_error.code == 'body_busy':
+                    self.log('WARNING', f'Body stop deferred until direct transaction resolves: {reset_error}')
+                    self.queue_reset_pending = True
+                    self.queue_reset_at = time.monotonic() + .05
+                else:
+                    self._important_failure(reset_error, reset=False)
+        else:
+            self.queue_reset_pending = True
+            self.queue_reset_at = time.monotonic() + 0.05
+        self.emit("body.connection", self.state())
 
     def _link_lost(self, exc):
         changed = self.body_connected or self.error is None
@@ -789,10 +1166,17 @@ class Body:
         self.stabilizer.reset("link_lost")
         self.error = str(exc)[:240]
         self._finish("failed", self.error)
+        transport_error = str(exc).lower()
+        if not self.motherboard_reset_pending and (
+                'acm' in transport_error or 'host rpc response timeout' in transport_error):
+            self.motherboard_reset_pending = True
+            # The supervisor stops camera/IMU, pulses GPIO, boots STM, then
+            # asks this sole ACM owner to reopen. Never replay the old plan.
+            self.emit('motherboard.reset_required', {'reason': self.error})
         try:
             self.hardware.reset()
-        except (Fault, OSError):
-            pass
+        except (Fault, OSError) as reset_error:
+            self.log("ERROR", f"Body queue reset during reconnect failed: {reset_error}")
         self.reconnect_at = time.monotonic() + self.retry_delay
         self.retry_delay = min(5.0, self.retry_delay * 2)
         if changed:
@@ -806,7 +1190,7 @@ class Body:
         yield "drain",
         self.head = {"pan": pan, "tilt": tilt}
 
-    def _pose(self, name):
+    def _pose(self, name, *, right_first=True):
         if name == "head_field":
             yield from self._head(0, self.parameters["head.field_tilt"])
             return
@@ -849,7 +1233,9 @@ class Body:
             else:
                 yield "sleep", 0.08
         elif name == "crouch":
-            yield from self._engine().walk_Initial_Pose(start_mixing=False)
+            engine = self._engine()
+            engine.first_Leg_Is_Right_Leg = right_first
+            yield from engine.walk_Initial_Pose(start_mixing=False)
             yield "drain",
         elif name == "stand":
             if self.pose != "crouch":
@@ -860,30 +1246,102 @@ class Body:
         if name in ("stand", "base_stand"):
             self.engine = None
 
-    def _game_step(self, direction, heading, side, cycles):
-        # Finite autonomous primitive: do not inherit manual drive scaling.
-        right_first = direction == "right"
-        for cycle in range(cycles):
-            if self.stop_requested:
+    def _complete_segment(self, delta, yaw):
+        job = self.jobs[self.active]
+        job['segments'].append(dict(index=len(job['segments']) + 1,
+                                    dx_m=delta[0], dy_m=delta[1], imu_yaw_rad=yaw))
+        job['progress'] = len(job['segments'])
+        self.segment_active = False
+        self.emit('job.progress', copy.deepcopy(job))
+
+    def _game_walk(self, kind, options):
+        from . import legacy_game_motion as legacy
+        from .odometry import walk_delta
+        from .recovery import body_position
+        def ball():
+            if 0 <= time.monotonic()-self.game_ball_stamp <= .5:
+                return self.game_ball
+            return None
+        p, a = self.parameters, options
+        recipes = {
+            'omni': lambda: legacy.omni(p, a['distance_m']*1000, a['course'], a['heading']),
+            'approach': lambda: legacy.approach(p, a['distance_m'], a['heading'], ball),
+            'verify': lambda: legacy.verify(p, a['heading'], ball),
+            'around': lambda: legacy.around(p, a['distance_m'], a['course'], a['initial_heading'], a['kick_heading'], ball),
+            'kickoff': lambda: legacy.kickoff(p, a['invert'], ball),
+        }
+        prepared, completed, last = False, 0, None
+        for order in recipes[kind]():
+            if not (yield from self.wait_for_imu()):
                 break
-            measured = quaternion_yaw(self.read_body_quaternion())
-            error = wrap(measured - heading)
-            if abs(error) > .35:
-                raise Fault("imu_invalid", "Goalkeeper heading changed")
-            rotation = max(-.15, min(.15, error * (-1 if right_first else 1)))
+            quaternion = self.read_body_quaternion()
+            if body_position(quaternion) != 'upright':
+                raise Fault('fallen', 'Fall during original walking manoeuvre')
+            if not prepared:
+                self.segment_active = True
+                yield from self._pose('crouch', right_first=order.right)
+                self.segment_active = False
+                prepared = True
+                if not (yield from self.wait_for_imu()):
+                    break
+                quaternion = self.read_body_quaternion()
+            yaw = quaternion_yaw(quaternion)
+            field_yaw = wrap(yaw+a['yaw_offset'])
+            rotation = legacy.clip(wrap(order.heading-field_yaw*order.yaw_gain), .3)
+            self.segment_active = True
             if self.simulated:
-                yield "sleep", .08
+                yield 'sleep', .08
             else:
                 engine = self._engine()
-                engine.first_Leg_Is_Right_Leg = right_first
-                yield from engine.walk_Cycle(0, side, rotation, cycle, 1000000)
-            yield "drain",
-        if not self.simulated:
-            yield from self._engine().walk_Cycle(0, 0, 0, 0, 1)
-        yield "drain",
-        self.pose = "crouch"
+                engine.first_Leg_Is_Right_Leg = order.right
+                yield from engine.walk_Cycle(order.step, order.side, rotation*(1 if order.right else -1),
+                                             order.index, order.total, half=order.half)
+            yield 'drain',
+            delta = walk_delta(p, order.step, order.side, first=completed == 0, right_first=order.right)
+            if order.half:
+                delta = tuple(value*.5 for value in delta)
+            self._complete_segment(delta, yaw)
+            completed += 1
+            last = order
+        if prepared:
+            self.segment_active = True
+            # Normal recipes carry the original terminal cycle number. If
+            # interrupted mid-series, settle both feet before leaving the gait.
+            if last and (last.half or last.index != last.total-1) and not self.simulated:
+                yield from self._engine().walk_Cycle(0, 0, 0, 0, 1)
+                yield 'drain',
+            self.pose = 'crouch'
+            yield from self._pose('stand')
+            yield from self._pose('base_stand')
+            self.segment_active = False
+
+    def _game_jump(self, direction, fraction):
+        from .odometry import jump_delta
+        from .recovery import body_position
+        if not (yield from self.wait_for_imu()):
+            return
+        if body_position(self.read_body_quaternion()) != 'upright':
+            raise Fault('fallen', 'Game jump requires upright body')
+        yaw = quaternion_yaw(self.read_body_quaternion())
+        self.segment_active = True
+        rows = self._jump_rows(direction, fraction)
+        if direction.startswith('turn_'):
+            rows.append([10] + [0] * 21)  # Same settled finish as rotation calibration.
+        yield from self._slot(rows, legs_only=direction.startswith('turn_'))
+        self._complete_segment(jump_delta(self.parameters, direction, fraction), yaw)
+        # Absolute calibrated rows finish in the neutral stance, not manual crouch.
+        self.pose = 'stand'
 
     def _walk(self, cycles=None, fixed=None):
+        # Manual mode never gets up implicitly. No preparation is sent until
+        # three distinct polling samples agree that the body is upright.
+        from .recovery import stable_position
+        position = yield from stable_position(self)
+        if position is None:
+            return
+        if position != 'upright':
+            raise Fault('fallen', f'Manual walking requires upright body, got {position}')
+        self.jobs[self.active]['posture_verified'] = True
         if self.pose != "crouch":
             yield from self._pose("crouch")
         cycle = 0
@@ -899,6 +1357,8 @@ class Body:
             right_first = drive["y"] < 0
             rotation = drive["yaw"] * self.parameters["walk.max_yaw_rad"] * drive["speed"]
             if drive.get("heading_hold", False) and abs(drive["yaw"]) <= 0.05:
+                if not (yield from self.wait_for_imu()):
+                    break
                 measured = quaternion_yaw(self.read_body_quaternion())
                 if heading is None:
                     heading = measured
@@ -1018,13 +1478,50 @@ class Body:
         finally:
             self.recovery_active = False
 
-    def _kick(self, leg, power, offset):
+    def _kick(self, leg, power, offset, kick_type=None):
+        kick_type = kick_type or self.parameters['motion.kick_type']
+        if self.active:
+            self.jobs[self.active].update(kick_type=kick_type, execution_uncertain=False)
+            self.emit('job.progress', dict(self.jobs[self.active]))
         self._release_stabilization()
         self.engine = None
-        self.pose = "unknown"
-        if self.simulated:
+        if kick_type == 'controller':
+            from .recovery import body_position
+            yield 'drain',
+            yield 'imu', self.body_imu.sequence
+            if self.stop_requested:
+                return
+            if body_position(self.body_imu.sample()) != 'upright':
+                raise Fault('posture_uncertain', 'Controller kick requires fresh upright IMU')
+            if self.pose != 'base_stand':
+                yield from self._pose('base_stand')
+                yield 'imu', self.body_imu.sequence
+                if body_position(self.body_imu.sample()) != 'upright':
+                    raise Fault('posture_uncertain', 'Controller kick preparation lost upright posture')
+            self.pose = 'unknown'
+            # Zubr owns these targets now; do not retain a pre-kick pose as feedback.
+            self.servo_targets.clear()
+            self.sent_targets.clear()
+            self.target_times.clear()
+            self.body_servos.invalidate('controller_kick')
+            for address, key in KICK_PARAMETERS:
+                if self.stop_requested:
+                    return
+                yield 'controller_write', address, {'right': int(leg == 'right'), 'power': power, 'offset': offset}[key]
+            if self.stop_requested:
+                return
+            yield 'controller_start',
+            if not self.hardware.controller_pending:
+                return
+            yield 'controller_wait', KickWitness()
+            yield 'imu', self.body_imu.sequence
+            if body_position(self.body_imu.sample()) != 'upright':
+                raise Fault('posture_uncertain', 'Controller kick ended without upright posture')
+        elif self.simulated:
+            self.pose = 'unknown'
             yield "sleep", 0.15
         else:
+            self.pose = 'unknown'
             engine = self._engine()
             engine.kick_power = power
             yield from engine.kick(leg == "right", kick_offset=offset)

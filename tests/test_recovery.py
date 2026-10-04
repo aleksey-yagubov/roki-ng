@@ -8,6 +8,8 @@ from roki_ng.parameters import Parameters
 from roki_ng.recovery import body_position, SLOTS
 from roki_ng.wire import Fault
 
+pytestmark = pytest.mark.usefixtures("body_clock")
+
 
 S = math.sqrt(0.5)
 POSITIONS = {
@@ -24,8 +26,7 @@ def fixture(tmp_path, initial, final="upright"):
                 lambda *a: None, lambda *a: None)
     body.command("control.acquire", {})
     body.hardware.drained = lambda: True
-    samples = iter([POSITIONS[initial]] * 3)
-    body.hardware.body_quaternion = lambda: next(samples, POSITIONS[final])
+    body.hardware.body_quaternion = lambda: POSITIONS[final if body.hardware.sent else initial]
     return body
 
 
@@ -33,7 +34,6 @@ def finish(body):
     for _ in range(10000):
         if not body.active:
             return
-        body.next_at = 0
         body.tick()
     raise AssertionError("Recovery did not terminate")
 
@@ -102,6 +102,14 @@ def test_failed_getup_does_not_walk_or_retry(tmp_path):
     assert job["progress"] == 0
     assert job["stage"] == "getting_up"
     assert not body.recovery_active
+    assert body.body_connected and body.error is None
+    retry = body.command("test.start", {"name": "get_up_test"})["job_id"]
+    finish(body)
+    assert body.jobs[retry]["status"] == "failed"  # Still lying, but no motion_fault lockout.
+    body.hardware.body_quaternion = lambda: POSITIONS["upright"]
+    final = body.command("test.start", {"name": "get_up_test"})["job_id"]
+    finish(body)
+    assert body.jobs[final]["status"] == "completed"
 
 
 def test_successful_getup_precedes_walk(tmp_path):
@@ -132,7 +140,7 @@ def test_cancel_during_getup_discards_remaining_rows(tmp_path, stop):
 def test_changing_posture_fails_without_movement(tmp_path):
     body = fixture(tmp_path, "back")
     samples = iter([POSITIONS[p] for p in ("back", "upright", "back")])
-    body.hardware.body_quaternion = lambda: next(samples)
+    body.hardware.body_quaternion = lambda: next(samples, POSITIONS["back"])
     result = body.command("test.start", {"name": "get_up_test"})
     finish(body)
     assert body.jobs[result["job_id"]]["status"] == "failed"

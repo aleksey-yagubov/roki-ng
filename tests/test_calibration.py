@@ -7,12 +7,15 @@ from unittest.mock import MagicMock
 import pytest
 
 from roki_ng.body import Body, RokiHardware
+from roki_ng.body_imu import BodyImu, quaternion_yaw
 from roki_ng.calibration import (ROTATION_KEYS, TITLES, TestPlan as Plan, describe,
-                                 quaternion_yaw, rotation_results, validate_args)
+                                 rotation_results, validate_args)
 from roki_ng.client import Client
 from roki_ng.parameters import Parameters
 from roki_ng.supervisor import Supervisor
 from roki_ng.wire import Fault, envelope, pack
+
+pytestmark = pytest.mark.usefixtures("body_clock")
 
 
 def make_body(tmp_path):
@@ -28,7 +31,6 @@ def finish(body):
     for _ in range(10000):
         if not body.active:
             return
-        body.next_at = 0
         body.tick()
     raise AssertionError("Test plan did not terminate")
 
@@ -39,8 +41,9 @@ def test_catalog_and_descriptions_fit_udp():
         pack(envelope("response", "test.describe", {"result": describe(name)}))
     assert describe("run_test")["parameters"]["mode"]["choices"] == [
         "short", "long", "spot", "backwards", "side_left", "side_right", "custom"]
-    with pytest.raises(Fault, match="slot 31"):
+    with pytest.raises(Fault) as unavailable:
         validate_args({"name": "kick_test", "mode": "new_kick"})
+    assert unavailable.value.code == 'not_supported'
     with pytest.raises(Fault, match="mode=custom"):
         validate_args({"name": "run_test", "mode": "short", "cycles": 7})
     with pytest.raises(Fault):
@@ -189,6 +192,9 @@ def test_bad_imu_fails_before_movement(tmp_path):
 
 def test_quaternion_protocol_and_wrap():
     hardware = object.__new__(RokiHardware)
+    hardware.mb = MagicMock()
+    hardware.body_failures = 0
+    hardware.mb.GetStatus.return_value = dict(body_failures=0, body_queue_size=0, body_busy=False)
     hardware.rcb = MagicMock()
     hardware.rcb.moveRamToComCmdSynchronize.return_value = (True, list(struct.pack("<hhhh", 0, 0, 0, 16384)))
     assert hardware.body_quaternion() == (0, 0, 0, 1)
@@ -198,12 +204,16 @@ def test_quaternion_protocol_and_wrap():
         with pytest.raises(Fault):
             quaternion_yaw(bad)
     angles = iter([3.1, -3.1, -3])
-    fake_body = MagicMock(parameters={})
-    fake_body.read_body_quaternion.side_effect = lambda: (
+    fake_body = MagicMock(parameters={}, body_imu=BodyImu())
+    source = MagicMock()
+    source.body_quaternion.side_effect = lambda: (
         lambda a: (0, 0, math.sin(a/2), math.cos(a/2)))(next(angles))
     plan = Plan(fake_body, {"name": "run_test"})
+    fake_body.body_imu.poll(source)
     assert plan.yaw() == pytest.approx(3.1)
+    fake_body.body_imu.poll(source)
     assert plan.yaw() == pytest.approx(2*math.pi-3.1)
+    fake_body.body_imu.poll(source)
     assert plan.yaw() == pytest.approx(2*math.pi-3)
 
 
@@ -222,7 +232,8 @@ def test_rotation_values_are_atomic(tmp_path):
     assert Parameters(tmp_path).values["motion.jump_yaw_cw"] == -0.4
 
 
-def test_rotation_plan_and_commit_barrier(tmp_path, monkeypatch):
+@pytest.mark.parametrize("turns", [(-2.3, 2.1), (-4.0, 3.6)])
+def test_rotation_plan_and_commit_barrier(tmp_path, monkeypatch, turns):
     body, events = make_body(tmp_path)
     yaw = [0.0]
     body.hardware.body_quaternion = lambda: tuple(v * math.sqrt(0.5) for v in (
@@ -238,7 +249,9 @@ def test_rotation_plan_and_commit_barrier(tmp_path, monkeypatch):
     def gait(self, cycles, **kwargs):
         assert cycles == 10
         gait_calls.append(kwargs)
-        yaw[0] += -2.3 if kwargs["right_leg"] else 2.1
+        for _ in range(cycles):
+            yaw[0] += (turns[0] if kwargs["right_leg"] else turns[1]) / cycles
+            yield "sleep", .05
         yield "drain",
 
     targets = []
@@ -251,6 +264,7 @@ def test_rotation_plan_and_commit_barrier(tmp_path, monkeypatch):
         self.engine.configure.side_effect = lambda values: baselines.append(dict(values))
 
     def turn(self, target):
+        assert self.body.jobs[self.body.active]['saved']
         targets.append(target)
         yaw[0] = target
         yield "drain",
@@ -260,21 +274,26 @@ def test_rotation_plan_and_commit_barrier(tmp_path, monkeypatch):
     monkeypatch.setattr(Plan, "gait", gait)
     monkeypatch.setattr(Plan, "turn_to_course", turn)
     result = body.command("test.start", {"name": "rotation_test"})
-    finish(body)
+    for _ in range(10000):
+        body.tick()
+        if body.calibration_pending:
+            break
     job = body.jobs[result["job_id"]]
     assert job["status"] == "saving"
-    assert targets == pytest.approx([2*math.pi/3, 0])
+    assert targets == []
     assert baselines[0]["motion.rotation_yield_right"] == 0.23
     assert baselines[0]["motion.rotation_yield_left"] == 0.23
-    assert baselines[-1]["motion.rotation_yield_left"] == 0.21
+    assert baselines[-1]["motion.rotation_yield_left"] == pytest.approx(turns[1] / 10)
     assert gait_calls == [
         {"right_leg": True, "rotation": -0.23},
         {"right_leg": False, "rotation": -0.23},
     ]
-    assert job["calibration"] == dict(zip(ROTATION_KEYS, [-0.4, 0.5, 0.23, 0.21]))
+    assert job["calibration"] == dict(zip(ROTATION_KEYS, [-0.4, 0.5, round(abs(turns[0]) / 10, 3), round(turns[1] / 10, 3)]))
     with pytest.raises(Fault, match="saved"):
         body.command("test.start", {"name": "run_test"})
     body.command("calibration.resolve", {"job_id": job["job_id"], "error": None})
+    finish(body)
+    assert targets == pytest.approx([2*math.pi/3, 0])
     assert job["status"] == "completed" and job["saved"]
     assert body.parameters["motion.jump_yaw_cw"] == -0.4
 
@@ -320,6 +339,56 @@ def test_hard_stop_cannot_save_partial_test(tmp_path):
     assert job["status"] == "cancelled"
     assert "calibration" not in job
     assert not any(op == "calibration.ready" for op, _ in events)
+
+
+@pytest.mark.parametrize('outcome', ['success', 'disk_error', 'cancel'])
+def test_mid_plan_save_ack_never_resumes_cancelled_or_unsaved_verification(tmp_path, monkeypatch, outcome):
+    async def run():
+        from unittest.mock import AsyncMock
+        supervisor = Supervisor({'simulate': True, 'state_dir': str(tmp_path)})
+        body, events = make_body(tmp_path/'body')
+        ident = body.command('test.start', {'name': 'rotation_test'})['job_id']
+        values = rotation_results(-1.2, 1.5, -2.3, 2.1)
+        job = body.jobs[ident]
+        job.update(status='saving', calibration=values)
+        body.calibration_pending = ident
+        worker = MagicMock()
+        worker.call = AsyncMock(side_effect=lambda op, args: body.command(op, args))
+        supervisor.workers['motherboard'] = worker
+        before = supervisor.params.path.read_bytes()
+        if outcome == 'disk_error':
+            monkeypatch.setattr(supervisor.params, 'save', lambda _: (_ for _ in ()).throw(OSError('disk full')))
+        if outcome == 'cancel':
+            body.command('motion.stop_hard', {})
+        await supervisor._save_calibration({'job_id': ident, 'values': values})
+        assert body.calibration_pending is None
+        if outcome == 'disk_error':
+            assert body.active is None and job['status'] == 'failed' and not job['saved']
+            assert supervisor.params.path.read_bytes() == before
+        else:
+            assert job['saved']
+            assert all(Parameters(tmp_path).values[k] == v for k,v in values.items())
+            if outcome == 'cancel':
+                assert body.active is None and job['status'] == 'cancelled'
+            else:
+                assert body.active == ident and job['status'] == 'running'
+                body._finish('failed', 'verification IMU lost')
+                assert job['saved'] and job['calibration'] == values
+                assert sum(op == 'calibration.ready' for op, _ in events) == 0
+    asyncio.run(run())
+
+
+def test_verification_residual_warns_instead_of_rejecting_saved_calibration(tmp_path):
+    body, events = make_body(tmp_path)
+    ident = body.command('test.start', {'name': 'rotation_test'})['job_id']
+    plan = Plan(body, {'name': 'rotation_test'})
+    plan.yaw = lambda: 0.
+    warnings = []
+    body.log = lambda level, text: warnings.append((level, text))
+    list(plan.turn_to_course(1.))  # Simulated robot deliberately makes no progress.
+    assert body.jobs[ident]['verification']['error_rad'] == 1.
+    assert any(level == 'WARNING' for level, _ in warnings)
+    assert body.pose == 'stand'
 
 
 def test_operator_measurement_round_trip(tmp_path):

@@ -24,6 +24,9 @@ def body(tmp_path):
 
 def test_native_reads_all_thirty_units_including_lower_knees():
     hardware = object.__new__(RokiHardware)
+    hardware.mb = MagicMock()
+    hardware.body_failures = 0
+    hardware.mb.GetStatus.return_value = dict(body_failures=0, body_queue_size=0, body_busy=False)
     hardware.rcb = MagicMock()
     expected = tuple(-16000 + i*1000 for i in range(30))
     hardware.rcb.moveRamToComCmdSynchronize.return_value = (True, struct.pack("<30h", *expected))

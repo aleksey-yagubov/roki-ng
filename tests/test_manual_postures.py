@@ -10,6 +10,8 @@ from roki_ng.motion.slots import decode, position, splits
 from roki_ng.parameters import Parameters
 from roki_ng.wire import Fault
 
+pytestmark = pytest.mark.usefixtures("body_clock")
+
 
 @pytest.fixture
 def body(tmp_path):
@@ -24,10 +26,9 @@ def body(tmp_path):
 
 
 def finish(body):
-    for _ in range(1000):
+    for _ in range(20000):
         if not body.active:
             return
-        body.next_at = 0
         body.tick()
     pytest.fail("Unfinished job")
 
@@ -142,10 +143,15 @@ def test_splits_hold_and_explicit_exit(body, kind, mode, exit_pose):
     ("stomach", (1, 0, 0, 0)), ("left", (0, 2**-.5, 0, 2**-.5)),
     ("right", (0, -2**-.5, 0, 2**-.5))])
 def test_manual_getup_direct_finish(body, mode, posture, q):
-    samples = iter([q] * 3)
-    body.hardware.body_quaternion = lambda: next(samples, (2**-.5, 0, 0, 2**-.5))
-    body.command("motion.get_up", {"crouch": mode})
-    steps = list(body.plan)
+    body.hardware.body_quaternion = lambda: (2**-.5, 0, 0, 2**-.5) if body.hardware.sent else q
+    original = body._get_up
+    steps = []
+    def record(crouch):
+        for step in original(crouch):
+            steps.append(step)
+            yield step
+    body._get_up = record
+    run(body, "motion.get_up", {"crouch": mode})
     # Only 2x50ms for sampling before and after, no half-second settling loop.
     assert sum(step[1] for step in steps if step[0] == "sleep") == pytest.approx(.2)
     assert body.pose == {"off": "stand", "on": "crouch", "centered": "crouch_centered"}[mode]
@@ -188,18 +194,23 @@ def test_heading_hold_latches_corrects_and_relatches(body):
     drive = {"x": 1, "y": 0, "yaw": 0, "speed": .5, "crouch": "on", "heading_hold": True}
     corrections = []
     body._start("motion.drive", body._walk(cycles=5, fixed=drive))
-    # Two drains per cycle: gait output and heading-feedback synchronization.
+    # Change physical heading and advance the polling worker until a gait
+    # cycle actually consumes it, instead of assuming generator yield counts.
     for a, yaw in [(3.1, 0), (-3.1, 0), (-3.1, 1), (1, 0), (1.1, 0)]:
         angle[0], drive["yaw"] = a, yaw
-        next(body.plan)
-        next(body.plan)
-    list(body.plan)
+        before = len(corrections)
+        for _ in range(100):
+            body.tick()
+            if len(corrections) > before:
+                break
+        assert len(corrections) == before + 1
+    finish(body)
     assert corrections[:5] == pytest.approx([0, (2*math.pi-6.2)*1.1, .075, 0, .11])
 
 
-def test_heading_disabled_does_not_poll_imu(body):
+def test_heading_disabled_does_not_depend_on_imu(body):
     body.pose = "crouch"
-    body.hardware.body_quaternion = lambda: pytest.fail("Unexpected IMU request")
+    body.hardware.body_quaternion = lambda: (0, 0, 0, 0)
     body._start("motion.drive", body._walk(cycles=2, fixed={
         "x": 1, "y": 0, "yaw": 0, "speed": .5, "crouch": "on"}))
     finish(body)
@@ -217,8 +228,9 @@ def test_simulation_new_motions_without_native_libraries(tmp_path, monkeypatch):
         run(body, "motion.jump", {"direction": "turn_left", "crouch": mode})
         run(body, "motion.splits", {"kind": "big", "crouch": mode})
         run(body, "motion.pose", {"name": "stand"})
-        samples = iter([(0, 0, 0, 1)] * 3)
-        body.hardware.body_quaternion = lambda: next(samples, (2**-.5, 0, 0, 2**-.5))
+        before = body.hardware.sent
+        body.hardware.body_quaternion = lambda: ((2**-.5, 0, 0, 2**-.5)
+                                                if body.hardware.sent > before else (0, 0, 0, 1))
         run(body, "motion.get_up", {"crouch": mode})
         assert body.engine is None
 

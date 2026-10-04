@@ -46,11 +46,14 @@ class Bootstrap:
         from gpiod.line import Direction, Value
 
         cfg = self.config
-        chip_path = find_reset_chip(cfg.get("gpiochip"))
-        self.lines = gpiod.request_lines(
-            chip_path, consumer="roki-ng-motherboard-reset",
-            config={MOTHERBOARD_RESET: gpiod.LineSettings(
-                direction=Direction.OUTPUT, output_value=Value.ACTIVE)})
+        if self.lines is None:
+            chip_path = find_reset_chip(cfg.get("gpiochip"))
+            self.lines = gpiod.request_lines(
+                chip_path, consumer="roki-ng-motherboard-reset",
+                config={MOTHERBOARD_RESET: gpiod.LineSettings(
+                    direction=Direction.OUTPUT, output_value=Value.ACTIVE)})
+        else:
+            self.lines.set_value(MOTHERBOARD_RESET, Value.ACTIVE)
         time.sleep(0.2)
         self.lines.set_value(MOTHERBOARD_RESET, Value.INACTIVE)
         with serial.Serial(cfg["uart"], 921600, timeout=0.1, write_timeout=0.5,

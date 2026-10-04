@@ -62,16 +62,16 @@ def test_mounted_pitch_sign(pitch):
     assert attitude(tuple(-v for v in quaternion(pitch))) == pytest.approx((pitch, 0))
 
 
-def test_no_poll_or_movement_by_default(rig):
+def test_polling_is_independent_of_subscribers_and_never_moves_by_default(rig):
     body, _, sent, _ = rig
     tick(rig, 10)
-    assert body.body_imu.sequence == 0 and not sent
+    assert body.body_imu.sequence == 10 and not sent
     body.command("body.telemetry.watch", {"enabled": True})
     tick(rig, 10)
-    assert body.body_imu.sequence == 10 and not sent
+    assert body.body_imu.sequence == 20 and not sent
     body.command("body.telemetry.watch", {"enabled": False})
     tick(rig, 10)
-    assert body.body_imu.sequence == 10
+    assert body.body_imu.sequence == 30 and not sent
 
 
 def test_invalid_and_busy_reads_are_not_disconnects(rig):
@@ -112,7 +112,7 @@ def test_deadband_slew_saturation_and_no_integral(rig):
     body.hardware.body_quaternion = lambda: quaternion(-10)
     for _ in range(300):
         now[0] += 0.02
-        imu.read(body.hardware)
+        imu.poll(body.hardware)
         proposed = reg.propose(imu, params, now[0])
         assert 0 <= proposed - reg.offset_deg <= 0.020001
         reg.commit(proposed)
@@ -121,7 +121,7 @@ def test_deadband_slew_saturation_and_no_integral(rig):
     body.hardware.body_quaternion = lambda: quaternion(0.2)
     for _ in range(300):
         now[0] += 0.02
-        imu.read(body.hardware)
+        imu.poll(body.hardware)
         reg.commit(reg.propose(imu, params, now[0]))
     assert reg.offset_deg == 0 and not reg.saturated
 
@@ -309,7 +309,7 @@ def test_datastreams_are_requested_shared_fresh_and_fit_udp(tmp_path):
         assert calls[-1] == ("body.telemetry.watch", {"enabled": False, "imu": False, "power": False})
         assert not server._sample("body.imu")["valid"]
         imu = BodyImu()
-        imu.read(SimpleNamespace(body_quaternion=lambda: quaternion(0)))
+        imu.poll(SimpleNamespace(body_quaternion=lambda: quaternion(0)))
         import time
         data = {"body.imu": imu.state(time.monotonic())}
         server.worker_event("motherboard", "body.telemetry", data)

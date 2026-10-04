@@ -1,6 +1,7 @@
 """Cancellable test plans with bounded posture recovery before each test."""
 
 import math
+import time
 
 from .wire import Fault, boolean, choice, number
 from .recovery import ensure_upright
@@ -23,7 +24,7 @@ MEASUREMENTS = {
     **{f"jump_{direction}": (f"motion.jump_{direction}_mm",)
        for direction in ("forward", "backward", "left", "right")},
 }
-UNAVAILABLE = {"new_kick": "Requires ball detection and body firmware slot 31; not implemented"}
+UNAVAILABLE = {"new_kick": "Ball-guided calibration scenario not implemented; use regular with motion.kick_type"}
 
 
 def describe(name):
@@ -80,14 +81,6 @@ def wrap(angle):
     return (angle + math.pi) % (2 * math.pi) - math.pi
 
 
-def quaternion_yaw(quaternion):
-    x, y, z, w = quaternion
-    norm = x*x + y*y + z*z + w*w
-    if not all(math.isfinite(v) for v in quaternion) or not 0.9 < norm < 1.1:
-        raise Fault("imu_invalid", "Body quaternion is invalid")
-    return math.atan2(2 * (w*z + x*y), norm - 2 * (y*y + z*z))
-
-
 def rotation_results(cw, ccw, right, left):
     # Do not turn noise or reversed wiring into a near-full-circle calibration.
     if not -4.5 <= cw <= -0.03 or not 0.03 <= ccw <= 4.5:
@@ -104,19 +97,17 @@ class TestPlan:
         self.body = body
         self.parameters = dict(body.parameters)
         self.engine = None
-        self.previous_yaw = None
-        self.unwrapped_yaw = 0.0
+        self.yaw_epoch = None
         self.origin = None
         self.progress = 0
 
     def yaw(self):
-        current = quaternion_yaw(self.body.read_body_quaternion())
-        if self.previous_yaw is not None:
-            self.unwrapped_yaw += wrap(current - self.previous_yaw)
-        else:
-            self.unwrapped_yaw = current
-        self.previous_yaw = current
-        return self.unwrapped_yaw
+        imu = self.body.body_imu
+        imu.sample()
+        if self.yaw_epoch is not None and self.yaw_epoch != imu.yaw_epoch:
+            raise Fault("imu_discontinuous", "Body IMU continuity lost; repeat calibration")
+        self.yaw_epoch = imu.yaw_epoch
+        return imu.unwrapped_yaw
 
     def mark(self, stage):
         self.progress += 1
@@ -144,6 +135,7 @@ class TestPlan:
         if engine:
             engine.first_Leg_Is_Right_Leg = right_leg
             yield from engine.walk_Initial_Pose(start_mixing=False)
+            yield "drain",
         else:
             yield "sleep", 0.01
         self.body.pose = "crouch"
@@ -152,13 +144,11 @@ class TestPlan:
             if self.body.stop_requested:
                 break
             correction = rotation
+            if not (yield from self.body.wait_for_imu()):
+                break
             if correction is None:
-                # Heading hold is the only gait mode which needs a live body
-                # yaw for every cycle.  In particular, rotation_test has a
-                # prescribed rotation and the original procedure samples the
-                # IMU only before and after each ten-cycle series.  Polling it
-                # here adds synchronous RCB traffic between queued leg frames
-                # and can make an otherwise healthy body link time out.
+                # All headings come from the worker's continuously unwrapped
+                # polling stream, never from a synchronous request in a plan.
                 measured = self.yaw()
                 limit = self.parameters["walk.heading_max_correction_rad"]
                 correction = max(-limit, min(limit, wrap(measured - self.origin) * self.parameters["walk.heading_kp"]
@@ -193,6 +183,8 @@ class TestPlan:
         for _ in range(20):
             if self.body.stop_requested:
                 return
+            if not (yield from self.body.wait_for_imu()):
+                return
             error = wrap(self.origin - self.yaw())
             if abs(error) < 0.09:
                 return
@@ -211,6 +203,8 @@ class TestPlan:
             yield from self.body._kick("right", 100, 0)
             return
         # Validate the body IMU before issuing even a head or pose command.
+        if not (yield from self.body.wait_for_imu()):
+            return
         self.origin = self.yaw()
         if not self.body.simulated and not name.startswith("jump_"):
             self.get_engine()
@@ -243,14 +237,17 @@ class TestPlan:
         yield from self.pause(1)
         deltas = []
         for direction in ("turn_right", "turn_left"):
+            if not (yield from self.body.wait_for_imu()):
+                return
             initial = self.yaw()
             for _ in range(3):
                 if self.body.stop_requested:
                     return
                 yield from self.jump(direction, calibration=True)
                 yield from self.pause(1)
-                self.yaw()
             yield from self.pause(2)
+            if not (yield from self.body.wait_for_imu()):
+                return
             deltas.append(self.yaw() - initial)
         self.parameters.update({"motion.rotation_yield_right": 0.23,
                                 "motion.rotation_yield_left": 0.23})
@@ -259,6 +256,8 @@ class TestPlan:
         for right in (True, False):
             if self.body.stop_requested:
                 return
+            if not (yield from self.body.wait_for_imu()):
+                return
             initial = self.yaw()
             # This is deliberately -0.23 in both passes.  The gait engine
             # reverses the physical turn when its first support leg changes;
@@ -266,22 +265,38 @@ class TestPlan:
             # here as well makes both measured turns have the same yaw sign.
             yield from self.gait(10, right_leg=right, rotation=-0.23)
             yield from self.pause(2)
+            if not (yield from self.body.wait_for_imu()):
+                return
             deltas.append(self.yaw() - initial)
         if not self.body.stop_requested:
             result = rotation_results(*deltas)
             self.parameters.update(result)
             if self.engine:
                 self.engine.configure(self.parameters)
-            # Original calibration ends with verification turns to +120 deg
-            # and back. Save only after both succeed, never halfway through.
-            yield from self.turn_to_course(self.origin + 2 * math.pi / 3)
-            yield from self.turn_to_course(self.origin)
+            # Original persists the complete measurements BEFORE the demo turns.
+            # Wait for supervisor's durable-save acknowledgement before moving.
+            ident = self.body.active
+            job = self.body.jobs[ident]
+            job.update(calibration=result, status='saving', stage='saving_calibration')
+            self.body.calibration_pending = ident
+            self.body.emit('job.progress', dict(job))
+            self.body.emit('calibration.ready', {'job_id': ident, 'values': result})
+            deadline = time.monotonic() + 10
+            while self.body.calibration_pending == ident:
+                if self.body.stop_requested:
+                    return
+                if time.monotonic() > deadline:
+                    raise Fault('calibration_invalid', 'Calibration save acknowledgement timed out')
+                yield 'sleep', .05
             if self.body.stop_requested:
                 return
-            self.body.jobs[self.body.active]["calibration"] = result
+            yield from self.turn_to_course(self.origin + 2 * math.pi / 3)
+            yield from self.turn_to_course(self.origin)
 
     def turn_to_course(self, target):
         if self.body.stop_requested:
+            return
+        if not (yield from self.body.wait_for_imu()):
             return
         error = wrap(target - self.yaw())
         if abs(error) < 0.035:
@@ -292,9 +307,12 @@ class TestPlan:
         if engine:
             engine.first_Leg_Is_Right_Leg = right
             yield from engine.walk_Initial_Pose(start_mixing=False)
+            yield "drain",
         completed = 0
         for cycle in range(cycles):
             if self.body.stop_requested:
+                break
+            if not (yield from self.body.wait_for_imu()):
                 break
             error = wrap(target - self.yaw())
             if abs(error) < 0.035:
@@ -308,11 +326,20 @@ class TestPlan:
             completed += 1
             self.mark("verify_course")
         if engine:
-            if completed < cycles and completed:
+            if self.body.stop_requested and completed < cycles and completed:
                 yield from engine.walk_Cycle(0, 0, 0, 0, 1)
             yield from engine.walk_Final_Pose()
+            engine.first_Leg_Is_Right_Leg = True
         yield "drain",
         self.body.pose = "stand"
         self.body.engine = None
-        if not self.body.stop_requested and abs(wrap(target - self.yaw())) >= 0.09:
-            raise Fault("calibration_invalid", "Verification turn did not reach target course")
+        if not (yield from self.body.wait_for_imu()):
+            return
+        if not self.body.stop_requested:
+            actual = self.yaw()
+            error = wrap(target - actual)
+            job = self.body.jobs[self.body.active]
+            job['verification'] = dict(target_rad=target, actual_rad=actual, error_rad=error)
+            if abs(error) >= .09:
+                self.body.log('WARNING', f'Calibration saved; verification turn residual {math.degrees(error):.1f} deg')
+            self.body.emit('job.progress', dict(job))

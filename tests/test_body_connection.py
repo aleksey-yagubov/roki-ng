@@ -42,6 +42,10 @@ def test_loss_cancels_motion_and_reconnect_does_not_resume(tmp_path):
     body.tick()
     assert body.jobs[ident]["status"] == "failed"
     assert body.plan is None and body.drive is None and body.engine is None
+    assert body.body_connected and not body.error
+    for _ in range(2):
+        body.reconnect_at = 0
+        body.tick()
     assert not body.body_connected
     assert any(op == "body.connection" for op, _ in events)
     assert logs[-1][0] == "ERROR"
@@ -56,16 +60,18 @@ def test_loss_cancels_motion_and_reconnect_does_not_resume(tmp_path):
     assert body.active == new_job
 
 
-def test_command_failure_is_connection_failure(tmp_path):
+def test_command_failure_only_disconnects_at_threshold(tmp_path):
     body, _, _ = make_body(tmp_path)
     body.hardware.head = lambda *args: fail()
-    with pytest.raises(Fault):
-        body.command("motion.head", {})
+    for count in range(1, 4):
+        with pytest.raises(Fault):
+            body.command("motion.head", {})
+        assert body.body_connected == (count < 3)
     assert not body.body_connected
     assert body.pose == "unknown"
 
 
-def test_retries_do_not_spam_and_shutdown_handles_reset_failure(tmp_path):
+def test_every_failure_is_logged_and_shutdown_handles_reset_failure(tmp_path):
     body, events, logs = make_body(tmp_path)
     body.hardware.probe = fail
     body.hardware.connect_body = fail
@@ -73,8 +79,8 @@ def test_retries_do_not_spam_and_shutdown_handles_reset_failure(tmp_path):
     for _ in range(5):
         body.reconnect_at = 0
         body.tick()
-    assert len([op for op, _ in events if op == "body.connection"]) == 1
-    assert len([level for level, _ in logs if level == "ERROR"]) == 1
+    assert len([data for op, data in events if op == "body.connection" and not data["body_connected"]]) == 1
+    assert len([level for level, _ in logs if level == "ERROR"]) >= 5
     body.close()
 
 
@@ -90,16 +96,19 @@ def test_single_spurious_ack_does_not_restore_connection(tmp_path):
     assert body.probe_successes == 0
 
 
-def test_walk_from_unknown_prepares_crouch_without_separate_command(tmp_path):
+def test_walk_from_unknown_prepares_crouch_without_separate_command(tmp_path, body_clock):
     body, _, _ = make_body(tmp_path)
-    body.command("motion.drive", {"x": 1})
+    job = body.command("motion.drive", {"x": 1})['job_id']
     assert body.pose == "unknown"
-    kind, values, frames, pause = next(body.plan)
-    assert kind == "servo" and values  # Simulated initial crouch targets.
-    assert (frames, pause) == (4, 3)
-    assert next(body.plan) == ("drain",)
-    next(body.plan)
+    body.tick()
+    assert body.hardware.sent == 0  # Must get fresh posture samples before preparation.
+    for _ in range(100):
+        body.command('motion.drive', {'x': 1})
+        body.tick()
+        if body.pose == 'crouch':
+            break
     assert body.pose == "crouch"
+    assert body.jobs[job]['posture_verified'] and body.hardware.sent > 0
 
 
 def test_stand_from_unknown_uses_base_pose(tmp_path):
@@ -175,7 +184,8 @@ def test_failed_queued_command_cancels_even_during_interpolation(tmp_path):
     body.hardware.check_queue = fail
     body.tick()
     assert body.jobs[job]["status"] == "failed"
-    assert not body.body_connected and body.plan is None
+    assert body.body_connected and body.plan is None
+    assert body.state()["important_errors_5s"] == 1
 
 
 def test_empty_queue_with_active_uart_is_not_drained():

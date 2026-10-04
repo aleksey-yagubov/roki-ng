@@ -37,10 +37,12 @@ def body_position(quaternion):
 
 def stable_position(body):
     positions = []
+    sequence = None
     for index in range(3):
-        if body.stop_requested:
+        if not (yield from body.wait_for_imu(sequence)):
             return None
         positions.append(body_position(body.read_body_quaternion()))
+        sequence = body.body_imu.sequence
         if index < 2:
             yield "sleep", 0.05
     if len(set(positions)) != 1:

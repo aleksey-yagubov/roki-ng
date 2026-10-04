@@ -5,7 +5,7 @@ from roki_ng.parameters import Parameters
 
 
 @pytest.fixture
-def body(tmp_path, monkeypatch):
+def body(tmp_path, monkeypatch, body_clock):
     from roki_ng.motion import engine
 
     class FakeEngine:

@@ -23,6 +23,8 @@ def test_native_unsigned_adc_and_errors():
     hardware = object.__new__(RokiHardware)
     hardware.rcb = MagicMock()
     hardware.mb = MagicMock()
+    hardware.body_failures = 0
+    hardware.mb.GetStatus.return_value = dict(body_failures=0, body_queue_size=0, body_busy=False)
     hardware.rcb.moveRamToComCmdSynchronize.return_value = (True, b"\xfe\xff")
     assert hardware.body_power_adc() == 65534
     hardware.rcb.moveRamToComCmdSynchronize.assert_called_once_with(0xCC, 2)
@@ -83,7 +85,7 @@ def test_poll_is_opt_in_rate_limited_and_yields_to_motion(body):
     body.tick()
     body.tick()
     body.hardware.body_power_adc.assert_called_once()
-    assert body.body_imu.sequence == 0 and body.body_servos.received_at is None
+    assert body.body_imu.sequence > 0 and body.body_servos.received_at is None
     body.body_power.next_at = 0
     body.body_power.received_at -= 2
     body.plan = iter([("sleep", 1)])
@@ -100,7 +102,7 @@ def test_poll_is_opt_in_rate_limited_and_yields_to_motion(body):
     assert body.hardware.body_power_adc.call_count == 2
 
 
-def test_busy_expires_and_link_loss_clears_values(body):
+def test_busy_expires_and_polling_failure_does_not_disconnect(body):
     body.body_power.read(body.hardware)
     body.body_power.received_at -= 2
     body.hardware.body_power_adc = MagicMock(side_effect=Fault("body_busy", "busy"))
@@ -108,10 +110,10 @@ def test_busy_expires_and_link_loss_clears_values(body):
     assert data["valid"] and data["busy_reads"] == 1 and body.body_connected
     assert not body.body_power.state(time.monotonic() + 2)["valid"]
     body.hardware.body_power_adc.side_effect = Fault("hardware_error", "Timeout")
-    with pytest.raises(Fault):
-        body.command("body.telemetry.read", {"power": True})
+    body.command("body.telemetry.read", {"power": True})
     data = body._body_telemetry()["body.power"]
-    assert not body.body_connected and not data["valid"]
+    assert body.body_connected and not data["valid"]
+    assert body.state()["important_errors_5s"] == 0
     assert data["adc_raw"] is data["voltage_v"] is data["source_mono_ns"] is None
     assert "Timeout" in data["error"]
 
@@ -154,7 +156,7 @@ def test_power_subscription_through_worker_and_udp(tmp_path):
             assert sample["age_ms"] < 3000
             snapshot = await client.request("data.snapshot", {"topic": "body.power"})
             assert snapshot["valid"] and snapshot["data"]["adc_raw"] == 3242
-            assert server.body_telemetry["body.imu"]["sequence"] == 0
+            assert server.body_telemetry["body.imu"]["sequence"] > 0
             server.body_telemetry["body.power"]["source_mono_ns"] -= 4_000_000_000
             assert not server._sample("body.power")["valid"]
             assert not server._sample("body.power")["data"]["valid"]

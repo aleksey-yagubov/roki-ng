@@ -45,8 +45,8 @@ class BodyServos:
             measured = body.hardware.body_positions()
             if len(measured) != 30:
                 raise Fault("servo_data_invalid", "Body positions must contain 30 values")
-        except Fault as exc:
-            if exc.code == "body_busy":
+        except (Fault, OSError) as exc:
+            if isinstance(exc, Fault) and exc.code == "body_busy":
                 self.busy += 1
             else:
                 self.invalid += 1

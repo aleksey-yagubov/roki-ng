@@ -60,5 +60,10 @@ def test_bootstrap_never_requests_bluecoin(gpio, monkeypatch):
         "/dev/gpiochip7", consumer="roki-ng-motherboard-reset",
         config={platform.MOTHERBOARD_RESET: {"direction": "output", "output_value": 1}})
     module.request_lines.return_value.set_value.assert_called_once_with(platform.MOTHERBOARD_RESET, 0)
+    port.read_until.side_effect = [b'PCB_NAME = MOTHERBOARD-V.1.0', b'CONNECTION OK', b'Starting firmware']
+    bootstrap.start()
+    assert module.request_lines.call_count == 1
+    assert module.request_lines.return_value.set_value.call_args_list[-2:].copy() == [
+        ((platform.MOTHERBOARD_RESET, 1),), ((platform.MOTHERBOARD_RESET, 0),)]
     bootstrap.close()
     module.request_lines.return_value.release.assert_called_once()
