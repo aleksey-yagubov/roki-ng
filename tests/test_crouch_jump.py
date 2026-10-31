@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from roki_ng.body import Body
+from roki_ng.body.runtime import Body
 from roki_ng.parameters import Parameters
 from roki_ng.wire import Fault
 

@@ -1,6 +1,7 @@
 import pytest
-from roki_ng.stream import Streams
-from roki_ng.video_sources import capture_source, frame_source
+from roki_ng.stream.worker import Streams
+from roki_ng.stream.sources import capture_source
+from roki_ng.stream.sources import frame_source
 from roki_ng.wire import Fault
 
 

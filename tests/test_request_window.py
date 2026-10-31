@@ -2,8 +2,13 @@ import asyncio
 from collections import Counter
 from contextlib import suppress
 
-from roki_ng.supervisor import REQUEST_WINDOW, Session, Supervisor
-from roki_ng.wire import envelope, pack, udp_socket, unpack
+from roki_ng.supervisor.supervisor import REQUEST_WINDOW
+from roki_ng.supervisor.supervisor import Session
+from roki_ng.supervisor.supervisor import Supervisor
+from roki_ng.wire import envelope
+from roki_ng.wire import pack
+from roki_ng.wire import udp_socket
+from roki_ng.wire import unpack
 
 
 def test_reordered_requests_and_retries_execute_once(tmp_path):

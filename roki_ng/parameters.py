@@ -6,9 +6,12 @@ from pathlib import Path
 import tempfile
 import copy
 
-from . import field_config
+import roki_ng.localisation.field_config as field_config
 
-from .wire import Fault, number, boolean, choice
+from roki_ng.wire import Fault
+from roki_ng.wire import number
+from roki_ng.wire import boolean
+from roki_ng.wire import choice
 
 # Starting colour ranges, not the calibration of any particular robot/field.
 COLOUR_DEFAULTS = {

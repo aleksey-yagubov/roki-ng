@@ -4,9 +4,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from roki_ng.supervisor import Supervisor
+from roki_ng.supervisor.supervisor import Supervisor
 from roki_ng.parameters import Parameters
-from roki_ng.head_menu import HeadMenu, menu_tree
+from roki_ng.supervisor.head_menu import HeadMenu
+from roki_ng.supervisor.head_menu import menu_tree
 from roki_ng.wire import Fault
 
 

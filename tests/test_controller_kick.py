@@ -2,8 +2,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from roki_ng.body import Body, RokiHardware
-from roki_ng.controller_kick import KickWitness
+from roki_ng.body.runtime import Body
+from roki_ng.body.runtime import RokiHardware
+from roki_ng.body.controller_kick import KickWitness
 from roki_ng.parameters import Parameters
 from roki_ng.wire import Fault
 

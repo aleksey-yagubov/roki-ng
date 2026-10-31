@@ -4,13 +4,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from roki_ng.body import Body
+from roki_ng.body.runtime import Body
 from roki_ng.client import Client
-from roki_ng.body_imu import BodyImu, attitude
+from roki_ng.body.body_imu import BodyImu
+from roki_ng.body.body_imu import attitude
 from roki_ng.parameters import Parameters
-from roki_ng.stabilization import CrouchStabilizer
-from roki_ng.supervisor import Supervisor, Session
-from roki_ng.wire import Fault, envelope, pack
+from roki_ng.body.stabilization import CrouchStabilizer
+from roki_ng.supervisor.supervisor import Supervisor
+from roki_ng.supervisor.supervisor import Session
+from roki_ng.wire import Fault
+from roki_ng.wire import envelope
+from roki_ng.wire import pack
 
 
 def quaternion(pitch):
@@ -262,7 +266,7 @@ def test_session_expiry_stops_control_before_disabling_telemetry(tmp_path):
 
 def test_native_ik_rigid_pitch_rotation_mainly_changes_hip(tmp_path):
     pytest.importorskip("starkit")
-    from roki_ng.motion.engine import Engine
+    from roki_ng.body.motion.engine import Engine
     params = Parameters(tmp_path).values
     for centered in (False, True):
         engine = Engine(params)

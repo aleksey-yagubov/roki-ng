@@ -11,7 +11,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from roki_ng.field_observations import segment, field_model, observations, detect_circle, likelihood, update
+from roki_ng.vision.field_observations import segment
+from roki_ng.vision.field_observations import field_model
+from roki_ng.vision.field_observations import observations
+from roki_ng.vision.field_observations import detect_circle
+from roki_ng.vision.field_observations import likelihood
+from roki_ng.vision.field_observations import update
 from tools.bird_view_probe import bird_view, head_angles
 
 

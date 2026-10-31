@@ -5,7 +5,7 @@ import pytest
 from unittest.mock import AsyncMock
 
 from test_simple_football import harness, commands
-from roki_ng.legacy_strategy import OriginalStrategy
+from roki_ng.supervisor.game.legacy_strategy import OriginalStrategy
 
 
 def danger(tmp_path, x=.5, y=0.):
@@ -131,7 +131,7 @@ def test_pickup_cancels_kickoff_without_repeating(tmp_path):
 
 
 def test_menu_angle_selection_preserves_entry_and_delay():
-    from roki_ng.head_menu import menu_tree
+    from roki_ng.supervisor.head_menu import menu_tree
     game = next(i for i in menu_tree().children if i.label == 'Game')
     danger_menu = next(i for i in game.children if i.label == 'Danger football')
     for position in danger_menu.children:

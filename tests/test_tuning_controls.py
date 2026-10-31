@@ -3,9 +3,12 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from roki_ng.supervisor import Supervisor
-from roki_ng.parameters import Parameters,SCHEMA
-from roki_ng.wire import Fault,pack,envelope
+from roki_ng.supervisor.supervisor import Supervisor
+from roki_ng.parameters import Parameters
+from roki_ng.parameters import SCHEMA
+from roki_ng.wire import Fault
+from roki_ng.wire import pack
+from roki_ng.wire import envelope
 
 
 def server(tmp_path,state=None):

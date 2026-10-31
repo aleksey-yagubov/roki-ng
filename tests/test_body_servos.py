@@ -6,12 +6,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from roki_ng.body import Body, RokiHardware
-from roki_ng.body_servos import target_zubr
+from roki_ng.body.runtime import Body
+from roki_ng.body.runtime import RokiHardware
+from roki_ng.body.servos import target_zubr
 from roki_ng.client import Client
 from roki_ng.parameters import Parameters
-from roki_ng.supervisor import Supervisor
-from roki_ng.wire import Fault, envelope, pack
+from roki_ng.supervisor.supervisor import Supervisor
+from roki_ng.wire import Fault
+from roki_ng.wire import envelope
+from roki_ng.wire import pack
 
 
 @pytest.fixture

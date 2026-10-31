@@ -4,11 +4,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from roki_ng.body import Body
-from roki_ng.motion.engine import Engine
+from roki_ng.body.runtime import Body
+from roki_ng.body.motion.engine import Engine
 from roki_ng.parameters import Parameters
-from roki_ng.supervisor import Supervisor, Session
-from roki_ng.wire import pack, envelope
+from roki_ng.supervisor.supervisor import Supervisor
+from roki_ng.supervisor.supervisor import Session
+from roki_ng.wire import pack
+from roki_ng.wire import envelope
 
 
 @pytest.mark.parametrize("right_first,rotation,coefficient", [

@@ -126,9 +126,9 @@ def main():
               f'# Source SHA256: {hashlib.sha256(source.encode()).hexdigest()}\n'
               'import math\nimport time\nfrom dataclasses import dataclass\n\n'
               'uprint = print\n\n@dataclass\nclass Servo:\n    Id: int = 0\n    Sio: int = 0\n    Data: int = 0\n\n')
-    add("roki_ng/motion/gait.py", header + ast.unparse(module) + "\n")
+    add("roki_ng/body/motion/gait.py", header + ast.unparse(module) + "\n")
     robot = (SOURCE / "Robots/class_Robot_Roki_2.py").read_text()
-    add("roki_ng/motion/model.py", "\n".join(line.rstrip() for line in robot.splitlines()).rstrip() + "\n")
+    add("roki_ng/body/motion/model.py", "\n".join(line.rstrip() for line in robot.splitlines()).rstrip() + "\n")
     real = ast.parse((SOURCE / "Soccer/Motion/class_Motion_real.py").read_text())
     jumps = {}
     for n in ast.walk(real):

@@ -5,7 +5,10 @@ from types import SimpleNamespace as NS
 import numpy as np
 import pytest
 
-from roki_ng import dataplane, field_observations, localisation_debug, localisation_worker
+from roki_ng import dataplane
+import roki_ng.vision.field_observations as field_observations
+import roki_ng.localisation.debug as localisation_debug
+import roki_ng.localisation.worker as localisation_worker
 from roki_ng.parameters import SCHEMA
 
 

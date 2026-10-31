@@ -3,7 +3,7 @@ import pytest
 
 
 def test_measurement_is_not_reused_or_accepted_out_of_order():
-    from roki_ng.localisation import PoseFilter
+    from roki_ng.localisation.filter import PoseFilter
     pf = PoseFilter([-1., -.5, .4], count=512)
     assert pf.update(10, [], None)['valid'] is False
     before=pf.particles.copy()
@@ -15,7 +15,7 @@ def test_measurement_is_not_reused_or_accepted_out_of_order():
 
 
 def test_empty_frame_loses_pose_without_fabricated_measurement():
-    from roki_ng.localisation import PoseFilter
+    from roki_ng.localisation.filter import PoseFilter
     pf=PoseFilter([-1.,-.5,.4],count=512)
     result=pf.update(1,[],None)
     assert result['valid'] is False
@@ -24,8 +24,8 @@ def test_empty_frame_loses_pose_without_fabricated_measurement():
 
 
 def test_symmetric_white_map_cannot_establish_field_side():
-    from roki_ng.localisation import PoseFilter
-    from roki_ng.field_observations import field_model
+    from roki_ng.localisation.filter import PoseFilter
+    from roki_ng.vision.field_observations import field_model
     pose=np.array([-1.,-.5,.4]);c,s=np.cos(pose[2]),np.sin(pose[2])
     lines=(field_model()-pose[:2])@np.array([[c,-s],[s,c]])
     pf=PoseFilter(pose,count=1024)
@@ -36,13 +36,13 @@ def test_symmetric_white_map_cannot_establish_field_side():
 
 
 def test_particle_count_and_prior_are_bounded():
-    from roki_ng.localisation import PoseFilter
+    from roki_ng.localisation.filter import PoseFilter
     for prior,count in [([0,0,float('nan')],512),([0,0,0],10000000)]:
         with pytest.raises(ValueError):PoseFilter(prior,count=count)
 
 
 def test_quaternion_projection_matches_reference_without_scipy():
-    from roki_ng.ground_projection import head_angles
+    from roki_ng.vision.ground_projection import head_angles
     # Independent SciPy Rotation reference values, computed on the workstation.
     # Keep this regression runnable on Buildroot without desktop tools or SciPy.
     for q, expected in (
@@ -56,7 +56,7 @@ def test_quaternion_projection_matches_reference_without_scipy():
 
 
 def test_localisation_worker_starts_idle_and_reports_stale_candidate(tmp_path, monkeypatch):
-    from roki_ng.localisation_worker import Localisation
+    from roki_ng.localisation.worker import Localisation
     worker=Localisation({'state_dir':str(tmp_path)},lambda *a:None,lambda *a:None)
     assert worker.state()['running'] is False
     worker.result={'candidate':[0.,0.,0.], 'valid':False}
@@ -71,7 +71,7 @@ def test_supervisor_rejects_localisation_without_imu_sync(tmp_path):
     import asyncio
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
-    from roki_ng.supervisor import Supervisor
+    from roki_ng.supervisor.supervisor import Supervisor
     from roki_ng.wire import Fault
     async def run():
         server=Supervisor({'state_dir':str(tmp_path)});server.mode='MANUAL'
@@ -87,7 +87,7 @@ def test_supervisor_rejects_localisation_without_imu_sync(tmp_path):
 def test_capture_stop_stops_localisation_before_camera(tmp_path):
     import asyncio
     from types import SimpleNamespace
-    from roki_ng.supervisor import Supervisor
+    from roki_ng.supervisor.supervisor import Supervisor
     async def run():
         events=[];server=Supervisor({'state_dir':str(tmp_path)})
         async def call(op,*a,**kw):events.append(op);return {}
@@ -100,7 +100,7 @@ def test_capture_stop_stops_localisation_before_camera(tmp_path):
 def test_localisation_datastream_does_not_call_candidate_valid(tmp_path):
     import time
     from types import SimpleNamespace
-    from roki_ng.supervisor import Supervisor
+    from roki_ng.supervisor.supervisor import Supervisor
     server=Supervisor({'state_dir':str(tmp_path)})
     server.workers['localisation']=SimpleNamespace(alive=True,last_heartbeat=time.monotonic(),
         state={'state':'ready','result':{'valid':False,'candidate':[0,0,0]}})
@@ -109,7 +109,7 @@ def test_localisation_datastream_does_not_call_candidate_valid(tmp_path):
 
 def test_runtime_segmentation_preserves_capture_coordinates():
     import cv2
-    from roki_ng.field_observations import runtime_paint_mask
+    from roki_ng.vision.field_observations import runtime_paint_mask
     im=np.full((650,800,3),(40,140,45),np.uint8)
     cv2.line(im,(80,320),(720,320),(240,240,240),8)
     cv2.rectangle(im,(80,100),(720,590),(240,240,240),8)
@@ -120,7 +120,7 @@ def test_runtime_segmentation_preserves_capture_coordinates():
 
 
 def test_fast_colour_classification_matches_euclidean_distance():
-    from roki_ng.field_observations import classify
+    from roki_ng.vision.field_observations import classify
     rng=np.random.default_rng(19)
     values=rng.uniform(0,255,(40,30,3)).astype(np.float32)
     centres=rng.uniform(0,255,(5,3)).astype(np.float32)
@@ -130,7 +130,8 @@ def test_fast_colour_classification_matches_euclidean_distance():
 
 def test_half_resolution_features_keep_full_resolution_coordinates():
     import cv2
-    from roki_ng.field_observations import observations,detect_circle
+    from roki_ng.vision.field_observations import observations
+    from roki_ng.vision.field_observations import detect_circle
     mask=np.zeros((720,720),np.uint8)
     cv2.circle(mask,(370,410),50,255,7)
     cv2.line(mask,(80,410),(650,410),255,5)
@@ -143,7 +144,7 @@ def test_half_resolution_features_keep_full_resolution_coordinates():
 
 def test_goal_posts_require_vertical_structure_and_nearby_turf():
     import cv2
-    from roki_ng.goal_observations import goal_candidates
+    from roki_ng.vision.goal_observations import goal_candidates
     image=np.full((650,800,3),180,np.uint8)
     image[400:]=(40,140,45)
     cv2.rectangle(image,(180,300),(190,425),(200,40,20),-1)
@@ -161,7 +162,7 @@ def test_goal_posts_require_vertical_structure_and_nearby_turf():
 
 def test_goal_detection_rejects_clipped_base():
     import cv2
-    from roki_ng.goal_observations import goal_candidates
+    from roki_ng.vision.goal_observations import goal_candidates
     image=np.full((650,800,3),(40,140,45),np.uint8)
     cv2.rectangle(image,(100,300),(120,649),(0,220,240),-1)
     assert goal_candidates(image)==[]
@@ -170,7 +171,7 @@ def test_goal_detection_rejects_clipped_base():
 @pytest.mark.parametrize('colour,bgr', [('yellow',(0,220,240)), ('blue',(200,40,20))])
 def test_goal_colours_preserve_identity_and_reject_background(colour,bgr):
     import cv2
-    from roki_ng.goal_observations import goal_candidates
+    from roki_ng.vision.goal_observations import goal_candidates
     image=np.full((650,800,3),180,np.uint8)
     image[350:]=(40,140,45)
     cv2.rectangle(image,(300,250),(310,400),bgr,-1)
@@ -185,7 +186,7 @@ def test_goal_colours_preserve_identity_and_reject_background(colour,bgr):
 
 
 def test_parallel_lines_do_not_claim_constrained_geometry():
-    from roki_ng.localisation import PoseFilter
+    from roki_ng.localisation.filter import PoseFilter
     lines=np.array([[[-1.,y],[1.,y]] for y in [-1.175,0,1.175]])
     pf=PoseFilter([0,0,0],count=512)
     pf.particles[:]=0
@@ -195,7 +196,8 @@ def test_parallel_lines_do_not_claim_constrained_geometry():
 
 
 def test_configuration_id_changes_only_for_metric_configuration():
-    from roki_ng.field_config import configuration_id,DEFAULTS
+    from roki_ng.localisation.field_config import configuration_id
+    from roki_ng.localisation.field_config import DEFAULTS
     p=DEFAULTS|{'match.own_goal':0,'localisation.camera_height_m':.4068}
     assert configuration_id(p)==configuration_id(p|{'vision.field_auto':False})
     assert configuration_id(p)!=configuration_id(p|{'localisation.camera_height_m':.5})
@@ -203,8 +205,8 @@ def test_configuration_id_changes_only_for_metric_configuration():
 
 
 def test_proposal_ambiguity_does_not_become_physical_accuracy():
-    from roki_ng.localisation import PoseFilter
-    from roki_ng.field_observations import field_model
+    from roki_ng.localisation.filter import PoseFilter
+    from roki_ng.vision.field_observations import field_model
     pf=PoseFilter([0,0,0],count=512)
     pf.particles[:256]=[0,0,0]
     pf.particles[256:]=[0,0,np.pi]
@@ -216,7 +218,7 @@ def test_proposal_ambiguity_does_not_become_physical_accuracy():
 
 def test_segmentation_keeps_original_pixel_edges():
     import cv2
-    from roki_ng.field_observations import runtime_paint_mask
+    from roki_ng.vision.field_observations import runtime_paint_mask
     image=np.full((650,800,3),(40,140,45),np.uint8)
     cv2.rectangle(image,(80,80),(720,590),(240,240,240),7)
     cv2.line(image,(111,101),(651,551),(240,240,240),3)
@@ -230,12 +232,13 @@ def test_segmentation_keeps_original_pixel_edges():
 def test_bounded_status_with_four_goals_fits_udp(tmp_path):
     import time
     from types import SimpleNamespace
-    from roki_ng.supervisor import Supervisor
-    from roki_ng.localisation_worker import Localisation
-    from roki_ng.localisation import PoseFilter
-    from roki_ng.field_observations import field_model
-    from roki_ng.field_config import GEOMETRY
-    from roki_ng.wire import UDP_LIMIT, unpack
+    from roki_ng.supervisor.supervisor import Supervisor
+    from roki_ng.localisation.worker import Localisation
+    from roki_ng.localisation.filter import PoseFilter
+    from roki_ng.vision.field_observations import field_model
+    from roki_ng.localisation.field_config import GEOMETRY
+    from roki_ng.wire import UDP_LIMIT
+    from roki_ng.wire import unpack
     worker=Localisation({'state_dir':'/tmp'},lambda *a:None,lambda *a:None)
     result=PoseFilter([0,0,0]).update(1,field_model(),None)
     result.pop('proposal_spread',None)
@@ -272,15 +275,17 @@ def test_bounded_status_with_four_goals_fits_udp(tmp_path):
 
 def test_circle_refinement_rejects_filled_disc():
     import cv2
-    from roki_ng.field_observations import detect_circle
+    from roki_ng.vision.field_observations import detect_circle
     mask=np.zeros((720,720),np.uint8)
     cv2.circle(mask,(350,400),48,255,-1)
     assert detect_circle(mask,.5) is None
 
 
 def test_halfway_association_uses_configured_map_size():
-    from roki_ng.field_observations import likelihood
-    from roki_ng.field_config import DEFAULTS,line_model,circle_model
+    from roki_ng.vision.field_observations import likelihood
+    from roki_ng.localisation.field_config import DEFAULTS
+    from roki_ng.localisation.field_config import line_model
+    from roki_ng.localisation.field_config import circle_model
     params=DEFAULTS|{'field.geometry':DEFAULTS['field.geometry']|{'length':6.,'width':4.}}
     model=line_model(params)
     circle={'center_robot_m':[0.,0.]}
@@ -293,7 +298,7 @@ def test_halfway_association_uses_configured_map_size():
 
 
 def test_weak_geometry_does_not_move_particle_proposals():
-    from roki_ng.localisation import PoseFilter
+    from roki_ng.localisation.filter import PoseFilter
     pf=PoseFilter([0,0,0],count=512)
     # Three parallel fragments leave position along the lines unconstrained.
     lines=np.array([[[-1.,y],[1.,y]] for y in (-1.175,0.,1.175)])
@@ -305,8 +310,8 @@ def test_weak_geometry_does_not_move_particle_proposals():
 
 
 def test_ambiguous_mirrored_field_does_not_collapse_to_one_side():
-    from roki_ng.localisation import PoseFilter
-    from roki_ng.field_observations import field_model
+    from roki_ng.localisation.filter import PoseFilter
+    from roki_ng.vision.field_observations import field_model
     pf=PoseFilter([0,0,0],count=512)
     pf.particles[:256]=[0,0,0]
     pf.particles[256:]=[0,0,np.pi]
@@ -317,8 +322,8 @@ def test_ambiguous_mirrored_field_does_not_collapse_to_one_side():
 
 
 def test_concentrated_prior_does_not_hide_opposite_side_hypothesis():
-    from roki_ng.localisation import PoseFilter
-    from roki_ng.field_observations import field_model
+    from roki_ng.localisation.filter import PoseFilter
+    from roki_ng.vision.field_observations import field_model
     pf=PoseFilter([0,0,0],count=512)
     pf.particles[:]=0
     before=pf.particles.copy()
@@ -329,8 +334,8 @@ def test_concentrated_prior_does_not_hide_opposite_side_hypothesis():
 
 
 def test_circle_recovers_translation_without_claiming_unique_field_side():
-    from roki_ng.localisation import PoseFilter
-    from roki_ng.field_observations import field_model
+    from roki_ng.localisation.filter import PoseFilter
+    from roki_ng.vision.field_observations import field_model
     pose=np.array([-1.3,-.95,.2]);c,s=np.cos(pose[2]),np.sin(pose[2])
     rotation=np.array([[c,-s],[s,c]])
     lines=(field_model()-pose[:2])@rotation
@@ -346,7 +351,8 @@ def test_circle_recovers_translation_without_claiming_unique_field_side():
 
 def test_ground_projection_matches_legacy_matrix_rays(monkeypatch):
     import cv2,math
-    from roki_ng.ground_projection import GroundProjection,head_angles
+    from roki_ng.vision.ground_projection import GroundProjection
+    from roki_ng.vision.ground_projection import head_angles
     g=GroundProjection.__new__(GroundProjection)
     g.P=np.array([[500.,0,800],[0,500.,650],[0,0,1]])
     row,col=np.indices((720,720),dtype=np.float32)
@@ -369,8 +375,8 @@ def test_ground_projection_matches_legacy_matrix_rays(monkeypatch):
 
 
 def test_coloured_goal_pair_breaks_symmetry_but_rejects_teleport():
-    from roki_ng.localisation import PoseFilter
-    from roki_ng.field_observations import field_model
+    from roki_ng.localisation.filter import PoseFilter
+    from roki_ng.vision.field_observations import field_model
     from roki_ng.parameters import SCHEMA
     p={k:v[1] for k,v in SCHEMA.items()}
     pose=np.array([-1.2,-.8,.2]);c,s=np.cos(pose[2]),np.sin(pose[2]);rot=np.array([[c,-s],[s,c]])
@@ -393,7 +399,8 @@ def test_coloured_goal_pair_breaks_symmetry_but_rejects_teleport():
 
 
 def test_goal_pair_rejects_single_fragment_and_duplicate_colours():
-    from roki_ng.goal_observations import paired_bearings,bearing_log_likelihood
+    from roki_ng.vision.goal_observations import paired_bearings
+    from roki_ng.vision.goal_observations import bearing_log_likelihood
     class Projector:
         def bearing(self,p,q):return p[0]/500
         def ground_point(self,p,q):return np.array(p)/100
@@ -406,7 +413,7 @@ def test_goal_pair_rejects_single_fragment_and_duplicate_colours():
 
 
 def test_matching_goal_bearings_without_field_contact_do_not_reweight_pose():
-    from roki_ng.goal_observations import bearing_log_likelihood
+    from roki_ng.vision.goal_observations import bearing_log_likelihood
     particles=np.array([[0.,0.,0.],[0.,0.,np.pi]])
     goals=[{'colour':'blue','x':1.675,'y':0.,'width':1.}]
     feet=np.array([[1.675,-.5],[1.675,.5]])
@@ -419,7 +426,7 @@ def test_matching_goal_bearings_without_field_contact_do_not_reweight_pose():
 
 
 def test_post_ground_intersection_rejects_horizon():
-    from roki_ng.ground_projection import GroundProjection
+    from roki_ng.vision.ground_projection import GroundProjection
     g=GroundProjection.__new__(GroundProjection)
     g.ground=np.array([[[0.,0.,-.4]]])
     g._pixel_ray=lambda *a:np.array([1.,0.,.1])
@@ -429,7 +436,7 @@ def test_post_ground_intersection_rejects_horizon():
 
 
 def test_map_gate_rejects_background_and_unmatched_pose():
-    from roki_ng.goal_observations import mapped_candidates
+    from roki_ng.vision.goal_observations import mapped_candidates
     class Projector:
         def ground_point(self,pixel,q):return np.asarray(pixel,float)
     goals=[{'colour':'blue','x':1.675,'y':0.,'width':1.}]
@@ -446,7 +453,7 @@ def test_map_gate_rejects_background_and_unmatched_pose():
 
 
 def test_alternative_pairs_of_same_goal_are_not_extra_evidence():
-    from roki_ng.goal_observations import bearing_log_likelihood
+    from roki_ng.vision.goal_observations import bearing_log_likelihood
     particles=np.array([[0.,0.,0.],[0.,0.,np.pi]])
     feet=np.array([[1.675,-.5],[1.675,.5]])
     pair={'colour':'blue','bearings':np.arctan2(feet[:,1],feet[:,0]),'ground_feet':feet}
@@ -458,7 +465,7 @@ def test_alternative_pairs_of_same_goal_are_not_extra_evidence():
 
 
 def test_upright_height_filter_rejects_near_ground_colour_fragments():
-    from roki_ng.goal_observations import upright_candidates
+    from roki_ng.vision.goal_observations import upright_candidates
     class Projector:
         def upright_height(self,foot,top,q):return foot[0]
     goals=[{'colour':'yellow','height':.6}]
@@ -468,7 +475,7 @@ def test_upright_height_filter_rejects_near_ground_colour_fragments():
 
 def test_adaptive_paint_excludes_carpet_outer_edge_but_keeps_inner_boundary():
     import cv2
-    from roki_ng.field_observations import runtime_paint_mask
+    from roki_ng.vision.field_observations import runtime_paint_mask
     image=np.full((650,800,3),230,np.uint8)
     image[100:600,60:740]=(40,140,45)
     cv2.rectangle(image,(90,130),(710,570),(245,245,245),6)

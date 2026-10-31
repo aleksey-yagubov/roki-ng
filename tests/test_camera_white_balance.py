@@ -2,9 +2,9 @@ from types import SimpleNamespace as NS
 from unittest.mock import Mock
 import asyncio
 import pytest
-from roki_ng.camera import Camera
+from roki_ng.camera.worker import Camera
 from roki_ng.parameters import Parameters
-from roki_ng.supervisor import Supervisor
+from roki_ng.supervisor.supervisor import Supervisor
 from roki_ng.wire import Fault
 
 RED = 'camera.white_balance.red_gain'

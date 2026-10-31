@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from roki_ng.platform import Bootstrap
+from roki_ng.motherboard.bootstrap import Bootstrap
 
 
 def main():

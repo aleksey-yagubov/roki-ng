@@ -4,8 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from roki_ng.head_menu import HeadButtons, HeadMenu, menu_tree
-from roki_ng.supervisor import Session, Supervisor
+from roki_ng.supervisor.head_menu import HeadButtons
+from roki_ng.supervisor.head_menu import HeadMenu
+from roki_ng.supervisor.head_menu import menu_tree
+from roki_ng.supervisor.supervisor import Session
+from roki_ng.supervisor.supervisor import Supervisor
 from roki_ng.client import Client
 from roki_ng.wire import Fault
 
@@ -200,7 +203,8 @@ def test_local_menu_lease_and_worker_completion(tmp_path):
 
 @pytest.mark.parametrize("fail", [False, True])
 def test_ready_only_after_all_worker_initializations(tmp_path, monkeypatch, fail):
-    from roki_ng import head_menu, supervisor
+    import roki_ng.supervisor.head_menu as head_menu
+    import roki_ng.supervisor.supervisor as supervisor
     events = []
 
     class Worker:

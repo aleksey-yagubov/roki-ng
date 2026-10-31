@@ -5,9 +5,14 @@ import cv2
 import numpy as np
 import pytest
 
-from roki_ng.field_config import disk_model,circle_model,line_model,short_line_lengths
-from roki_ng.field_marks import disks,disk_scores,short_lines
-from roki_ng.localisation import PoseFilter
+from roki_ng.localisation.field_config import disk_model
+from roki_ng.localisation.field_config import circle_model
+from roki_ng.localisation.field_config import line_model
+from roki_ng.localisation.field_config import short_line_lengths
+from roki_ng.vision.field_marks import disks
+from roki_ng.vision.field_marks import disk_scores
+from roki_ng.vision.field_marks import short_lines
+from roki_ng.localisation.filter import PoseFilter
 from roki_ng.parameters import Parameters
 
 
@@ -87,8 +92,9 @@ def test_short_strokes_alone_cannot_certify_even_with_circle(parameters):
 
 
 def test_pipeline_uses_spots_even_if_long_line_detector_fails(parameters,monkeypatch):
-    from roki_ng import field_observations,goal_observations
-    from roki_ng.localisation_pipeline import process_frame
+    import roki_ng.vision.field_observations as field_observations
+    import roki_ng.vision.goal_observations as goal_observations
+    from roki_ng.localisation.pipeline import process_frame
     mask=np.zeros((720,720),np.uint8)
     cv2.circle(mask,(360,360),4,255,-1)
     monkeypatch.setattr(field_observations,'runtime_paint_mask',lambda *a:mask)

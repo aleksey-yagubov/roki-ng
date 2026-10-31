@@ -7,7 +7,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from roki_ng.supervisor import Supervisor, Session
+from roki_ng.supervisor.supervisor import Supervisor
+from roki_ng.supervisor.supervisor import Session
 
 
 async def check(role):

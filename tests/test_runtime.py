@@ -4,13 +4,19 @@ import time
 
 import pytest
 
-from roki_ng.body import Body
+from roki_ng.body.runtime import Body
 from roki_ng.client import Client
 from roki_ng.parameters import Parameters
-from roki_ng.stream import Streams, pipeline_description
-from roki_ng.video_sources import capture_source, settings_for
-from roki_ng.supervisor import Supervisor, Session
-from roki_ng.wire import Fault, UDP_LIMIT, udp_socket, unpack
+from roki_ng.stream.worker import Streams
+from roki_ng.stream.worker import pipeline_description
+from roki_ng.stream.sources import capture_source
+from roki_ng.stream.sources import settings_for
+from roki_ng.supervisor.supervisor import Supervisor
+from roki_ng.supervisor.supervisor import Session
+from roki_ng.wire import Fault
+from roki_ng.wire import UDP_LIMIT
+from roki_ng.wire import udp_socket
+from roki_ng.wire import unpack
 
 
 def test_parameters_persist_and_reject_invalid(tmp_path):

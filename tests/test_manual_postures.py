@@ -3,10 +3,12 @@ import sys
 
 import pytest
 
-from roki_ng.body import Body
-from roki_ng.motion.engine import Engine
-from roki_ng.motion.model import Robot
-from roki_ng.motion.slots import decode, position, splits
+from roki_ng.body.runtime import Body
+from roki_ng.body.motion.engine import Engine
+from roki_ng.body.motion.model import Robot
+from roki_ng.body.motion.slots import decode
+from roki_ng.body.motion.slots import position
+from roki_ng.body.motion.slots import splits
 from roki_ng.parameters import Parameters
 from roki_ng.wire import Fault
 

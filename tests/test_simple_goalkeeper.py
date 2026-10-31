@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 from roki_ng.parameters import Parameters
-from roki_ng.simple_goalkeeper import SimpleGoalkeeper
-from roki_ng.head_menu import menu_tree
+from roki_ng.supervisor.game.simple_goalkeeper import SimpleGoalkeeper
+from roki_ng.supervisor.head_menu import menu_tree
 from test_game import observation, setup
 
 
@@ -120,10 +120,10 @@ def test_recovery_requires_new_goal_direction(tmp_path):
 def test_keeper_colour_hint_does_not_require_posts_or_opening(monkeypatch, tmp_path):
     np = pytest.importorskip('numpy')
     pytest.importorskip('cv2')
-    from roki_ng.football_vision import goal_parts
+    from roki_ng.detection.football import goal_parts
     binary = np.zeros((650, 800), np.uint8)
     binary[300:305, 400:410] = 255
-    monkeypatch.setattr('roki_ng.colour_masks.mask', lambda *a: binary)
+    monkeypatch.setattr('roki_ng.vision.colour_masks.mask', lambda *a: binary)
     projector = SimpleNamespace(_pixel_ray=lambda *a: [1., 0., -.2])
     args = (np.zeros((650,800,3), np.uint8), Parameters(tmp_path).values,
             projector, [0,0,0,1], {'pan':0})

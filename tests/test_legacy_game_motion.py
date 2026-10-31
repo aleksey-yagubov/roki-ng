@@ -7,12 +7,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from roki_ng import legacy_game_motion as legacy
-from roki_ng.body import Body
+import roki_ng.body.motion.legacy_game_motion as legacy
+from roki_ng.body.runtime import Body
 from roki_ng.parameters import Parameters
-from roki_ng.game_geometry import camera_height
-from roki_ng.legacy_strategy import TABLE, kick_target
-from roki_ng.odometry import GameOdometry
+from roki_ng.body.motion.game_geometry import camera_height
+from roki_ng.supervisor.game.legacy_strategy import TABLE
+from roki_ng.supervisor.game.legacy_strategy import kick_target
+from roki_ng.body.motion.odometry import GameOdometry
 
 
 def original_method(name):
@@ -229,7 +230,7 @@ def test_original_series_cancellation_keeps_only_confirmed_cycles(tmp_path, body
 
 
 def test_camera_height_tracks_original_leg_and_neck_geometry(tmp_path):
-    from roki_ng.motion.model import Robot
+    from roki_ng.body.motion.model import Robot
     p, model = Parameters(tmp_path).values, Robot()
     nominal = camera_height(p, model, None, 0., 0., 0, p['game.head_tilt'])
     assert nominal == pytest.approx(p['game.camera_height_m'])

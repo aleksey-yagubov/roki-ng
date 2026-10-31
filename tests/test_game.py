@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from roki_ng.game import Goalkeeper
-from roki_ng.legacy_strategy import OriginalStrategy
+from roki_ng.supervisor.game.game import Goalkeeper
+from roki_ng.supervisor.game.legacy_strategy import OriginalStrategy
 from roki_ng.parameters import Parameters
 from roki_ng.wire import Fault
 
@@ -200,7 +200,8 @@ def test_stop_cancels_start_still_checking_body(tmp_path):
 
 
 def test_supervisor_game_protocol_ownership_and_barriers(tmp_path):
-    from roki_ng.supervisor import Supervisor, Session
+    from roki_ng.supervisor.supervisor import Supervisor
+    from roki_ng.supervisor.supervisor import Session
     async def run():
         server = Supervisor({'simulate': True, 'state_dir': str(tmp_path)})
         server.workers = {r: Worker(r) for r in ('motherboard', 'camera', 'detection')}
@@ -223,7 +224,8 @@ def test_supervisor_game_protocol_ownership_and_barriers(tmp_path):
 
 
 def test_head_menu_game_uses_game_stop_and_status():
-    from roki_ng.head_menu import HeadMenu, Item
+    from roki_ng.supervisor.head_menu import HeadMenu
+    from roki_ng.supervisor.head_menu import Item
     async def run():
         calls, voices = [], []
         async def command(op, args):
@@ -240,7 +242,8 @@ def test_head_menu_game_uses_game_stop_and_status():
 
 
 def test_emergency_stop_cancels_pending_supervisor_start(tmp_path):
-    from roki_ng.supervisor import Supervisor, Session
+    from roki_ng.supervisor.supervisor import Supervisor
+    from roki_ng.supervisor.supervisor import Session
     async def run():
         s = Supervisor({'simulate': True, 'state_dir': str(tmp_path)})
         s.workers = {r: Worker(r) for r in ('motherboard', 'camera', 'detection')}
@@ -263,7 +266,7 @@ def test_emergency_stop_cancels_pending_supervisor_start(tmp_path):
 
 
 def test_queued_parameter_write_rechecks_game_after_lock(tmp_path):
-    from roki_ng.supervisor import Supervisor
+    from roki_ng.supervisor.supervisor import Supervisor
     async def run():
         s = Supervisor({'simulate': True, 'state_dir': str(tmp_path)})
         await s.parameter_lock.acquire()
@@ -277,7 +280,8 @@ def test_queued_parameter_write_rechecks_game_after_lock(tmp_path):
 
 
 def test_stop_discards_game_start_waiting_for_parameter_lock(tmp_path):
-    from roki_ng.supervisor import Supervisor, Session
+    from roki_ng.supervisor.supervisor import Supervisor
+    from roki_ng.supervisor.supervisor import Session
     async def run():
         s = Supervisor({'simulate': True, 'state_dir': str(tmp_path)})
         s.workers = {r: Worker(r) for r in ('motherboard', 'camera', 'detection')}
@@ -296,7 +300,9 @@ def test_stop_discards_game_start_waiting_for_parameter_lock(tmp_path):
 
 
 def test_full_parameter_snapshot_fits_worker_ipc(tmp_path):
-    from roki_ng.wire import IPC_LIMIT, pack, unpack
+    from roki_ng.wire import IPC_LIMIT
+    from roki_ng.wire import pack
+    from roki_ng.wire import unpack
     message = {'body': {'parameters': Parameters(tmp_path).values}}
     assert unpack(pack(message, IPC_LIMIT), IPC_LIMIT) == message
     # The larger internal map limit must not relax untrusted operator messages.
@@ -350,7 +356,7 @@ def test_graceful_game_stop_waits_for_support_pose(tmp_path):
 
 @pytest.mark.parametrize('interruption', ['hard_stop', 'link_error'])
 def test_interrupted_exit_keeps_completed_steps_but_not_confirmed_stance(tmp_path, body_clock, interruption):
-    from roki_ng.body import Body
+    from roki_ng.body.runtime import Body
     body = Body({'simulate': True, 'parameters': Parameters(tmp_path).values}, lambda *a: None, lambda *a: None)
     body.command('control.acquire', {})
     body.pose = 'base_stand'
@@ -419,7 +425,8 @@ def test_autonomous_action_requires_new_base_stand_and_fresh_observation(tmp_pat
 
 @pytest.mark.parametrize('disconnect', [False, True])
 def test_game_survives_operator_release_and_reacquisition(tmp_path, disconnect):
-    from roki_ng.supervisor import Supervisor, Session
+    from roki_ng.supervisor.supervisor import Supervisor
+    from roki_ng.supervisor.supervisor import Session
     async def run():
         s = Supervisor({'simulate':True,'state_dir':str(tmp_path)})
         s.workers = {r:Worker(r) for r in ('motherboard','camera','detection','stream')}
@@ -477,7 +484,8 @@ def test_ball_loss_clock_counts_observations_during_step(tmp_path):
 
 
 def test_game_allows_live_vision_isp_logging_and_diagnostic_settings(tmp_path):
-    from roki_ng.supervisor import Supervisor, Session
+    from roki_ng.supervisor.supervisor import Supervisor
+    from roki_ng.supervisor.supervisor import Session
     async def run():
         s = Supervisor({'simulate':True,'state_dir':str(tmp_path)})
         s.workers = {r:Worker(r) for r in ('motherboard','camera','detection','localisation')}
@@ -513,7 +521,8 @@ def test_ball_start_uses_thresholds_changed_during_preparation(tmp_path):
 
 
 def test_colour_diagnostics_available_but_game_owns_localisation(tmp_path):
-    from roki_ng.supervisor import Supervisor, Session
+    from roki_ng.supervisor.supervisor import Supervisor
+    from roki_ng.supervisor.supervisor import Session
     async def run():
         s = Supervisor({'simulate':True,'state_dir':str(tmp_path)})
         s.workers = {r:Worker(r) for r in ('motherboard','camera','detection','localisation','stream')}
@@ -728,7 +737,7 @@ def test_unknown_movement_is_stopped_and_prepared_not_replayed(tmp_path):
     ('left', True, 0, 0), ('right', True, 0, 0),
 ])
 def test_only_immediate_enabled_center_uses_kickoff(tmp_path, monkeypatch, entry, enabled, delay, expected):
-    from roki_ng import game as module
+    import roki_ng.supervisor.game.game as module
     now = [time.monotonic()]
     monkeypatch.setattr(module, 'time', SimpleNamespace(monotonic=lambda: now[0],
         monotonic_ns=time.monotonic_ns, clock_gettime_ns=time.clock_gettime_ns, CLOCK_BOOTTIME=time.CLOCK_BOOTTIME))
@@ -775,7 +784,8 @@ def test_keeper_heading_is_rebased_for_arbitrary_imu_and_own_goal(tmp_path):
 
 
 def test_takeover_after_unconfirmed_game_stop_grants_lease_but_not_motion(tmp_path):
-    from roki_ng.supervisor import Supervisor, Session
+    from roki_ng.supervisor.supervisor import Supervisor
+    from roki_ng.supervisor.supervisor import Session
     async def run():
         server = Supervisor({'simulate': True, 'state_dir': str(tmp_path)})
         server.mode = 'GAME'
@@ -827,7 +837,8 @@ def test_lost_acceptance_reply_after_pause_confirms_stop(tmp_path):
 
 
 def test_physical_pickup_overrides_gui_lease_without_releasing_it(tmp_path):
-    from roki_ng.supervisor import Supervisor, Session
+    from roki_ng.supervisor.supervisor import Supervisor
+    from roki_ng.supervisor.supervisor import Session
     async def run():
         server = Supervisor({'simulate': True, 'state_dir': str(tmp_path)})
         server.mode, server.owner, server.lease_epoch = 'GAME', 42, 7
@@ -841,7 +852,7 @@ def test_physical_pickup_overrides_gui_lease_without_releasing_it(tmp_path):
 
 
 def test_head_reentry_after_gui_pickup_takes_over_then_releases_menu_control(tmp_path):
-    from roki_ng.supervisor import Supervisor
+    from roki_ng.supervisor.supervisor import Supervisor
     async def run():
         server = Supervisor({'simulate': True, 'state_dir': str(tmp_path)})
         server.workers = {r: Worker(r) for r in ('motherboard', 'camera', 'detection')}
@@ -907,7 +918,7 @@ def test_keeper_without_ball_returns_to_goal_in_short_sections(tmp_path):
                                                    ((.05, -.052), 0., 'kick'),
                                                    ((.19, .052), 0., 'five_jumps')])
 def test_original_forward_selects_approach_orbit_and_calibrated_kick(tmp_path, monkeypatch, ball_xy, target, expected):
-    from roki_ng import legacy_strategy
+    import roki_ng.supervisor.game.legacy_strategy as legacy_strategy
     monkeypatch.setattr(legacy_strategy, 'kick_target', lambda *args: (target, 60))
     async def run():
         game, s, _ = setup(tmp_path)
@@ -940,7 +951,7 @@ def test_original_forward_selects_approach_orbit_and_calibrated_kick(tmp_path, m
 
 def test_original_forward_replans_after_five_fine_jumps(tmp_path, monkeypatch):
     """A non-converging close observation cannot restart fine jumps forever."""
-    from roki_ng import legacy_strategy
+    import roki_ng.supervisor.game.legacy_strategy as legacy_strategy
     monkeypatch.setattr(legacy_strategy, 'kick_target', lambda *args: (0., 60))
 
     async def run():
@@ -977,7 +988,7 @@ def test_original_forward_replans_after_five_fine_jumps(tmp_path, monkeypatch):
 
 def test_close_kickable_ball_bypasses_orbit_when_robot_already_faces_goal(tmp_path, monkeypatch):
     """Regression for the field log: x=110, y=-50 was sent to orbit."""
-    from roki_ng import legacy_strategy
+    import roki_ng.supervisor.game.legacy_strategy as legacy_strategy
     monkeypatch.setattr(legacy_strategy, 'kick_target', lambda *args: (0., 100))
 
     async def run():
@@ -1006,7 +1017,7 @@ def test_close_kickable_ball_bypasses_orbit_when_robot_already_faces_goal(tmp_pa
 
 def test_five_fine_jumps_use_original_offset_kick_for_safe_residual(tmp_path, monkeypatch):
     """Field regression: x=86, y=-74 must kick with +12 mm offset."""
-    from roki_ng import legacy_strategy
+    import roki_ng.supervisor.game.legacy_strategy as legacy_strategy
     monkeypatch.setattr(legacy_strategy, 'kick_target', lambda *args: (0., 100))
 
     async def run():
@@ -1059,7 +1070,7 @@ def test_original_forward_search_turns_after_seven_distinct_failed_looks(tmp_pat
 
 
 def test_original_observation_settling_is_interruptible_by_pickup(tmp_path):
-    from roki_ng.legacy_strategy import OriginalStrategy
+    from roki_ng.supervisor.game.legacy_strategy import OriginalStrategy
     async def run():
         game, s, _ = setup(tmp_path)
         game.info['running'] = True
@@ -1073,7 +1084,7 @@ def test_original_observation_settling_is_interruptible_by_pickup(tmp_path):
 
 @pytest.mark.parametrize('role', ['keeper', 'forward'])
 def test_pause_resume_during_walk_preparation_discards_entire_decision(tmp_path, monkeypatch, role):
-    monkeypatch.setattr('roki_ng.legacy_strategy.kick_target', lambda *args: (0., 60))
+    monkeypatch.setattr('roki_ng.supervisor.game.legacy_strategy.kick_target', lambda *args: (0., 60))
     async def run():
         game, s, _ = setup(tmp_path)
         game.info['running'] = True
@@ -1108,7 +1119,7 @@ def test_pause_resume_during_walk_preparation_discards_entire_decision(tmp_path,
 
 
 def test_pause_resume_before_kick_requires_new_decision_and_ball(tmp_path, monkeypatch):
-    monkeypatch.setattr('roki_ng.legacy_strategy.kick_target', lambda *args: (0., 60))
+    monkeypatch.setattr('roki_ng.supervisor.game.legacy_strategy.kick_target', lambda *args: (0., 60))
     async def run():
         game, s, _ = setup(tmp_path)
         game.info['running'] = True
@@ -1199,9 +1210,9 @@ def test_game_observer_waits_for_confirmed_capture_alignment(tmp_path):
 @pytest.mark.parametrize('barrier', [None, 'pause', 'pickup'])
 def test_capture_loss_recovers_game_observer_but_respects_operator_barriers(tmp_path, monkeypatch, barrier):
     from collections import deque
-    from roki_ng.ball_observation import BallObservation
-    from roki_ng.detection import Detection
-    from roki_ng.supervisor import Supervisor
+    from roki_ng.detection.ball import BallObservation
+    from roki_ng.detection.worker import Detection
+    from roki_ng.supervisor.supervisor import Supervisor
 
     async def run():
         game, s, session = setup(tmp_path)

@@ -4,14 +4,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from roki_ng.ball_kick_test import run_ball_kick_test
+from roki_ng.supervisor.game.ball_kick_test import run_ball_kick_test
 from roki_ng.parameters import Parameters
 from roki_ng.wire import Fault
 from test_game import setup, until
 
 
 def test_head_menu_exposes_explicit_one_shot_start():
-    from roki_ng.head_menu import menu_tree
+    from roki_ng.supervisor.head_menu import menu_tree
     tests = next(item for item in menu_tree().children if item.label == 'Tests')
     item = next(item for item in tests.children if item.args.get('strategy') == 'ball_kick_test')
     assert item.op == 'game.start'
@@ -89,7 +89,7 @@ def test_lifecycle_finishes_once_without_kickoff_localisation_or_recovery(tmp_pa
                 raise Fault('fallen', 'Test fall')
             return True
         runner = AsyncMock(side_effect=test)
-        monkeypatch.setattr('roki_ng.game.run_ball_kick_test', runner)
+        monkeypatch.setattr('roki_ng.supervisor.game.game.run_ball_kick_test', runner)
         await game.start(session, {'strategy': 'ball_kick_test'})
         await until(lambda: not game.info['running'])
         assert runner.await_count == 1

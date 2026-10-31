@@ -4,7 +4,9 @@ import cv2
 import numpy as np
 import pytest
 
-from roki_ng.football_vision import goal_parts, assemble_goals, render_scene
+from roki_ng.detection.football import goal_parts
+from roki_ng.detection.football import assemble_goals
+from roki_ng.detection.football import render_scene
 from roki_ng.parameters import Parameters
 
 

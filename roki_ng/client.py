@@ -6,7 +6,12 @@ import ipaddress
 import json
 import uuid
 
-from .wire import Fault, UDP_LIMIT, envelope, pack, unpack, udp_socket
+from roki_ng.wire import Fault
+from roki_ng.wire import UDP_LIMIT
+from roki_ng.wire import envelope
+from roki_ng.wire import pack
+from roki_ng.wire import unpack
+from roki_ng.wire import udp_socket
 
 
 class Client:

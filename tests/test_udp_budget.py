@@ -2,11 +2,15 @@ import msgpack
 import asyncio
 import pytest
 
-from roki_ng.wire import Fault, UDP_LIMIT, pack, unpack
+from roki_ng.wire import Fault
+from roki_ng.wire import UDP_LIMIT
+from roki_ng.wire import pack
+from roki_ng.wire import unpack
 
 
 def test_long_game_job_events_do_not_forward_internal_segment_history(tmp_path):
-    from roki_ng.supervisor import Supervisor, Session
+    from roki_ng.supervisor.supervisor import Supervisor
+    from roki_ng.supervisor.supervisor import Session
     from roki_ng.wire import envelope
     s = Supervisor({'simulate': True, 'state_dir': str(tmp_path)})
     owner = Session(1, 2, ('127.0.0.1', 1), 'owner')
@@ -41,7 +45,8 @@ def test_complete_datagram_boundary(size):
 
 def test_reference_client_receives_full_size_sample():
     from roki_ng.client import Client
-    from roki_ng.wire import envelope, udp_socket
+    from roki_ng.wire import envelope
+    from roki_ng.wire import udp_socket
 
     async def run():
         source = udp_socket()
@@ -68,7 +73,7 @@ def test_reference_client_receives_full_size_sample():
 
 
 def test_game_recovery_status_with_unicode_errors_fits_datagram(tmp_path):
-    from roki_ng.supervisor import Supervisor
+    from roki_ng.supervisor.supervisor import Supervisor
     from roki_ng.wire import envelope
     server = Supervisor({'simulate': True, 'state_dir': str(tmp_path)})
     reason = 'Ошибка связи 🛑 ' * 100

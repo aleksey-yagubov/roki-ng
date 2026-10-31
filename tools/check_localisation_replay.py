@@ -8,10 +8,12 @@ import cv2
 import numpy as np
 
 from roki_ng.parameters import SCHEMA
-from roki_ng.field_observations import runtime_paint_mask, observations, detect_circle
-from roki_ng.ground_projection import GroundProjection
-from roki_ng.localisation import PoseFilter
-from roki_ng.goal_observations import goal_candidates
+from roki_ng.vision.field_observations import runtime_paint_mask
+from roki_ng.vision.field_observations import observations
+from roki_ng.vision.field_observations import detect_circle
+from roki_ng.vision.ground_projection import GroundProjection
+from roki_ng.localisation.filter import PoseFilter
+from roki_ng.vision.goal_observations import goal_candidates
 
 
 def main():

@@ -6,10 +6,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from roki_ng.localisation import PoseFilter
-from roki_ng.localisation_pipeline import process_frame
+from roki_ng.localisation.filter import PoseFilter
+from roki_ng.localisation.pipeline import process_frame
 from roki_ng.parameters import Parameters
-from roki_ng.visual_correction import CorrectionWindow
+from roki_ng.localisation.visual_correction import CorrectionWindow
 
 
 def goal_observation(p, pose, colour='blue'):
@@ -33,7 +33,7 @@ def test_goal_only_recovers_pose_without_three_lines_or_manual_flag(tmp_path):
 
 
 def test_imu_heading_resolves_side_for_white_lines_but_not_parallel_geometry(tmp_path):
-    from roki_ng.field_observations import field_model
+    from roki_ng.vision.field_observations import field_model
     p = Parameters(tmp_path).values
     assert not PoseFilter([0,0,0],parameters=p).update(1,field_model(),None)['valid']
     result = PoseFilter([0,0,0],parameters=p,heading=0).update(1,field_model(),None)
@@ -53,7 +53,8 @@ def test_two_white_goals_are_alternatives_not_false_side_proof(tmp_path):
 
 @pytest.mark.parametrize('failed_stage', ['segmentation','circle','lines'])
 def test_failure_in_paint_pipeline_does_not_skip_goals(tmp_path, monkeypatch, failed_stage):
-    from roki_ng import field_observations as f, goal_observations as g
+    import roki_ng.vision.field_observations as f
+    import roki_ng.vision.goal_observations as g
     p = Parameters(tmp_path).values
     image = np.zeros((650,800,3),np.uint8)
     def missing(*args,**kw):
@@ -118,7 +119,7 @@ def test_capture_barrier_freshness_disagreement_and_wrapped_angles():
 
 def test_game_corrects_only_standing_and_rejects_late_reply_after_pause(tmp_path):
     from test_game import setup
-    from roki_ng.game import capture_clock
+    from roki_ng.supervisor.game.game import capture_clock
     async def run():
         game,s,_=setup(tmp_path)
         game.info['running']=True
@@ -158,7 +159,7 @@ def test_game_corrects_only_standing_and_rejects_late_reply_after_pause(tmp_path
 
 
 def test_supervisor_exports_validity_and_capture_age(tmp_path):
-    from roki_ng.supervisor import Supervisor
+    from roki_ng.supervisor.supervisor import Supervisor
     s=Supervisor({'state_dir':str(tmp_path)})
     state=dict(running=True,age_ms=20,error=None,result={'valid':True,'candidate':[0,0,0]})
     worker=SimpleNamespace(alive=True,last_heartbeat=time.monotonic(),state=state)
@@ -172,7 +173,7 @@ def test_supervisor_exports_validity_and_capture_age(tmp_path):
 
 def test_no_observation_does_not_block_settling_and_motion_closes_window_first(tmp_path):
     from test_game import setup
-    from roki_ng.legacy_strategy import OriginalStrategy
+    from roki_ng.supervisor.game.legacy_strategy import OriginalStrategy
     async def run():
         game,s,_=setup(tmp_path)
         game.info['running']=True
@@ -203,7 +204,7 @@ def test_no_observation_does_not_block_settling_and_motion_closes_window_first(t
 
 def test_pickup_and_stale_imu_discard_pending_correction(tmp_path):
     from test_game import setup
-    from roki_ng.game import capture_clock
+    from roki_ng.supervisor.game.game import capture_clock
     async def run():
         game,s,_=setup(tmp_path)
         game.info['running']=True

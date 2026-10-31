@@ -3,8 +3,11 @@ import copy
 import pytest
 
 from roki_ng.parameters import Parameters
-from roki_ng.field_config import DEFAULTS, line_model, circle_model
-from roki_ng.wire import Fault, pack
+from roki_ng.localisation.field_config import DEFAULTS
+from roki_ng.localisation.field_config import line_model
+from roki_ng.localisation.field_config import circle_model
+from roki_ng.wire import Fault
+from roki_ng.wire import pack
 
 
 def test_defaults_roundtrip_and_wire_size(tmp_path):
@@ -42,7 +45,7 @@ def test_custom_marks_and_side_change(tmp_path):
 
 def test_ring_not_forced_to_field_centre(tmp_path):
     import numpy as np
-    from roki_ng.field_observations import likelihood
+    from roki_ng.vision.field_observations import likelihood
     p=Parameters(tmp_path)
     p.set('field.mark.00',p.values['field.mark.00']|{'enabled':True,'kind':'ring','x':1.,'size':.2})
     p.set('field.geometry',p.values['field.geometry']|{'circle_measured':True})
@@ -54,7 +57,7 @@ def test_ring_not_forced_to_field_centre(tmp_path):
 
 def test_field_compare_and_set_rejects_stale_editor(tmp_path):
     import asyncio
-    from roki_ng.supervisor import Supervisor
+    from roki_ng.supervisor.supervisor import Supervisor
     async def run():
         server=Supervisor({'state_dir':str(tmp_path)})
         key='field.geometry';old=copy.deepcopy(server.params.values[key]);new=old|{'length':3.}
@@ -68,7 +71,7 @@ def test_field_compare_and_set_rejects_stale_editor(tmp_path):
 def test_operator_colour_threshold_changes_goal_observation(tmp_path):
     import cv2
     import numpy as np
-    from roki_ng.goal_observations import goal_candidates
+    from roki_ng.vision.goal_observations import goal_candidates
     p=Parameters(tmp_path)
     image=np.full((650,800,3),(40,140,45),np.uint8)
     cv2.rectangle(image,(300,200),(310,400),(200,40,20),-1)
@@ -80,7 +83,7 @@ def test_operator_colour_threshold_changes_goal_observation(tmp_path):
 def test_goal_outside_turf_cannot_borrow_green_from_the_side(tmp_path):
     import cv2
     import numpy as np
-    from roki_ng.goal_observations import goal_candidates
+    from roki_ng.vision.goal_observations import goal_candidates
     p=Parameters(tmp_path)
     image=np.full((650,800,3),(100,100,100),np.uint8)
     image[300:620,200:760]=(40,140,45)
@@ -92,7 +95,7 @@ def test_goal_outside_turf_cannot_borrow_green_from_the_side(tmp_path):
 def test_true_goal_on_turf_boundary_retains_visible_support(tmp_path):
     import cv2
     import numpy as np
-    from roki_ng.goal_observations import goal_candidates
+    from roki_ng.vision.goal_observations import goal_candidates
     p=Parameters(tmp_path)
     image=np.full((650,800,3),(100,100,100),np.uint8)
     image[400:640,80:720]=(40,140,45)
@@ -103,7 +106,7 @@ def test_true_goal_on_turf_boundary_retains_visible_support(tmp_path):
 def test_post_support_can_cross_white_paint_but_not_background(tmp_path):
     import cv2
     import numpy as np
-    from roki_ng.goal_observations import goal_candidates
+    from roki_ng.vision.goal_observations import goal_candidates
     p=Parameters(tmp_path)
     image=np.full((650,800,3),(100,100,100),np.uint8)
     image[420:640,80:720]=(40,140,45)
@@ -117,7 +120,8 @@ def test_post_support_can_cross_white_paint_but_not_background(tmp_path):
 def test_thin_distant_posts_survive_large_ground_colour_fragments(tmp_path):
     import cv2
     import numpy as np
-    from roki_ng.goal_observations import goal_candidates,upright_candidates
+    from roki_ng.vision.goal_observations import goal_candidates
+    from roki_ng.vision.goal_observations import upright_candidates
     p=Parameters(tmp_path)
     image=np.full((650,800,3),(40,140,45),np.uint8)
     for i in range(12):cv2.rectangle(image,(30+i*55,300),(45+i*55,345),(0,220,230),-1)

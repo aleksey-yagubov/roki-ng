@@ -4,14 +4,19 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from roki_ng.camera import Camera
+from roki_ng.camera.worker import Camera
 from roki_ng.client import Client
-from roki_ng.dataplane import FRAME_BYTES, FRAME_HEADER
-from roki_ng.runtime_video import RuntimeVideo
-from roki_ng.stream import Streams
-from roki_ng.video_sources import frame_source
-from roki_ng.supervisor import Supervisor, Session
-from roki_ng.wire import Fault, UDP_LIMIT, envelope, pack
+from roki_ng.dataplane import FRAME_BYTES
+from roki_ng.dataplane import FRAME_HEADER
+from roki_ng.stream.runtime_video import RuntimeVideo
+from roki_ng.stream.worker import Streams
+from roki_ng.stream.sources import frame_source
+from roki_ng.supervisor.supervisor import Supervisor
+from roki_ng.supervisor.supervisor import Session
+from roki_ng.wire import Fault
+from roki_ng.wire import UDP_LIMIT
+from roki_ng.wire import envelope
+from roki_ng.wire import pack
 
 
 @pytest.mark.parametrize('name', ['detection', 'localisation'])
@@ -182,7 +187,7 @@ def test_receiver_deduplication_and_fixed_geometry():
 
 
 def test_live_max_fps_preserves_timestamps_and_drops_before_allocation(monkeypatch):
-    monkeypatch.setattr('roki_ng.runtime_video.FrameReader',lambda *a,**kw:NS(error=None,skipped=0,close=lambda:None))
+    monkeypatch.setattr('roki_ng.stream.runtime_video.FrameReader',lambda *a,**kw:NS(error=None,skipped=0,close=lambda:None))
     buffers=[]
     def allocate(*args):
         obj=NS(fill=lambda *a:None)

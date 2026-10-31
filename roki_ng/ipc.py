@@ -6,7 +6,10 @@ import socket
 import sys
 import time
 
-from .wire import Fault, IPC_LIMIT, pack, unpack
+from roki_ng.wire import Fault
+from roki_ng.wire import IPC_LIMIT
+from roki_ng.wire import pack
+from roki_ng.wire import unpack
 
 
 class WorkerPeer:

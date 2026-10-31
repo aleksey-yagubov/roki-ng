@@ -5,9 +5,12 @@ import pytest
 import numpy as np
 import cv2
 
-from roki_ng.ball_observation import BallObservation, BallTracker, ball_candidates, capture_time
+from roki_ng.detection.ball import BallObservation
+from roki_ng.detection.ball import BallTracker
+from roki_ng.detection.ball import ball_candidates
+from roki_ng.detection.ball import capture_time
 from roki_ng.parameters import SCHEMA
-from roki_ng.detection import Detection
+from roki_ng.detection.worker import Detection
 from roki_ng.wire import Fault
 
 

@@ -7,13 +7,18 @@ import cv2
 import numpy as np
 import pytest
 
-from roki_ng.ball_observation import BallObservation, ball_candidates
-from roki_ng.dataplane import FRAME_HEADER, FRAME_BYTES
-from roki_ng.detection import Detection
+from roki_ng.detection.ball import BallObservation
+from roki_ng.detection.ball import ball_candidates
+from roki_ng.dataplane import FRAME_HEADER
+from roki_ng.dataplane import FRAME_BYTES
+from roki_ng.detection.worker import Detection
 from roki_ng.parameters import Parameters
-from roki_ng.supervisor import Supervisor
-from roki_ng.vision_diagnostics import DiagnosticVideo, render
-from roki_ng.wire import Fault, envelope, pack
+from roki_ng.supervisor.supervisor import Supervisor
+from roki_ng.vision.vision_diagnostics import DiagnosticVideo
+from roki_ng.vision.vision_diagnostics import render
+from roki_ng.wire import Fault
+from roki_ng.wire import envelope
+from roki_ng.wire import pack
 
 
 def detector(tmp_path):
@@ -37,7 +42,7 @@ class Publisher:
 
 
 def test_video_is_on_demand_bounded_and_discards_invalidated_frame(monkeypatch):
-    monkeypatch.setattr('roki_ng.vision_diagnostics.Channel', Publisher)
+    monkeypatch.setattr('roki_ng.vision.vision_diagnostics.Channel', Publisher)
     video = DiagnosticVideo()
     image = np.zeros((650, 800, 3), np.uint8)
     header = (42, 123456789, 800, 650, 2400)
@@ -61,7 +66,7 @@ def test_video_is_on_demand_bounded_and_discards_invalidated_frame(monkeypatch):
 
 
 def test_mask_and_metadata_use_same_frame_and_parameter_revision(tmp_path, monkeypatch):
-    monkeypatch.setattr('roki_ng.vision_diagnostics.Channel', Publisher)
+    monkeypatch.setattr('roki_ng.vision.vision_diagnostics.Channel', Publisher)
     d = detector(tmp_path)
     d.video.start()
     frame = FRAME_HEADER.pack(53, 123456789, 800, 650, 2400) + b'\x00\x8c\xff'*(800*650)
@@ -81,13 +86,13 @@ def test_mask_and_metadata_use_same_frame_and_parameter_revision(tmp_path, monke
 
 
 def test_inflight_old_threshold_result_is_discarded(tmp_path, monkeypatch):
-    from roki_ng.detection import colour_blobs
+    from roki_ng.detection.worker import colour_blobs
     d = detector(tmp_path)
     def change_during_processing(*args, **kwargs):
         result = colour_blobs(*args, **kwargs)
         d.command('params.apply', {'vision.orange_ball.pixels_min': 100})
         return result
-    monkeypatch.setattr('roki_ng.detection.colour_blobs', change_during_processing)
+    monkeypatch.setattr('roki_ng.detection.worker.colour_blobs', change_during_processing)
     frame = FRAME_HEADER.pack(1, 1, 800, 650, 2400) + bytes(800*650*3)
     d._consume(memoryview(frame))
     assert d.result is None and d.video.latest is None
@@ -222,7 +227,7 @@ def test_video_failure_does_not_stop_observer_and_parameter_edit_clears_debug(tm
     class BrokenPublisher(Publisher):
         def loan(self, size):
             raise RuntimeError('video unavailable')
-    monkeypatch.setattr('roki_ng.vision_diagnostics.Channel', BrokenPublisher)
+    monkeypatch.setattr('roki_ng.vision.vision_diagnostics.Channel', BrokenPublisher)
     d = detector(tmp_path)
     logs = []
     d.log = lambda *args: logs.append(args)

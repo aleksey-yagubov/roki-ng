@@ -7,7 +7,10 @@ import pytest
 
 @pytest.fixture
 def body_clock(monkeypatch):
-    from roki_ng import body, body_imu, body_power, body_servos
+    import roki_ng.body.runtime as body
+    import roki_ng.body.body_imu as body_imu
+    import roki_ng.body.power as body_power
+    import roki_ng.body.servos as body_servos
     now = [time.monotonic()]
     clock = SimpleNamespace(monotonic=lambda: now[0],
                             monotonic_ns=lambda: int(now[0] * 1e9))

@@ -4,9 +4,11 @@ import time
 
 import pytest
 
-from roki_ng.goalkeeper import HEAD_TICK_RAD, ball_in_body
-from roki_ng.goalkeeper import keeper_target, KeeperMotionGuard
-from roki_ng.odometry import GameOdometry
+from roki_ng.supervisor.game.goalkeeper import HEAD_TICK_RAD
+from roki_ng.supervisor.game.goalkeeper import ball_in_body
+from roki_ng.supervisor.game.goalkeeper import keeper_target
+from roki_ng.supervisor.game.goalkeeper import KeeperMotionGuard
+from roki_ng.body.motion.odometry import GameOdometry
 from roki_ng.parameters import Parameters
 from test_game import setup, observation
 

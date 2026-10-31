@@ -3,10 +3,11 @@ import time
 
 import pytest
 
-from roki_ng.stream import StreamPipeline
-from roki_ng.video_sources import capture_source, frame_source
+from roki_ng.stream.worker import StreamPipeline
+from roki_ng.stream.sources import capture_source
+from roki_ng.stream.sources import frame_source
 from roki_ng.dataplane import FRAME_HEADER
-from roki_ng.runtime_video import RuntimeVideo
+from roki_ng.stream.runtime_video import RuntimeVideo
 
 
 def test_real_gstreamer_rtp_loopback():
@@ -89,7 +90,7 @@ def test_runtime_appsrc_h264_decode_and_colour(monkeypatch):
         def close(self):
             pass
 
-    monkeypatch.setattr("roki_ng.runtime_video.RuntimeVideo", InjectedFrames)
+    monkeypatch.setattr("roki_ng.stream.runtime_video.RuntimeVideo", InjectedFrames)
     receiver = Gst.parse_launch(
         'udpsrc name=udp port=0 caps="application/x-rtp,media=video,encoding-name=H264,payload=96,clock-rate=90000" '
         '! rtph264depay ! avdec_h264 ! videoconvert ! video/x-raw,format=BGR '

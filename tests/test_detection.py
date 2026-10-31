@@ -5,10 +5,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from roki_ng.dataplane import FRAME_HEADER
-from roki_ng.detection import Detection, colour_blobs
+from roki_ng.detection.worker import Detection
+from roki_ng.detection.worker import colour_blobs
 from roki_ng.parameters import Parameters
-from roki_ng.supervisor import Supervisor
-from roki_ng.wire import Fault, pack, envelope
+from roki_ng.supervisor.supervisor import Supervisor
+from roki_ng.wire import Fault
+from roki_ng.wire import pack
+from roki_ng.wire import envelope
 
 
 def test_lab_blobs_and_minimum_area(tmp_path):

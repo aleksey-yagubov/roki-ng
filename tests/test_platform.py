@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from roki_ng import platform
+import roki_ng.motherboard.bootstrap as platform
 
 
 @pytest.fixture

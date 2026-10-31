@@ -4,7 +4,7 @@ import fcntl
 from pathlib import Path
 import signal
 
-from .supervisor import Supervisor
+from roki_ng.supervisor.supervisor import Supervisor
 
 
 async def serve(config):

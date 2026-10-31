@@ -6,8 +6,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from roki_ng.simple_football import SimpleFootball
-from roki_ng.football_vision import assemble_goals, shot_clear, camera_geometry, body_point, SceneTracker
+from roki_ng.supervisor.game.simple_football import SimpleFootball
+from roki_ng.detection.football import assemble_goals
+from roki_ng.detection.football import shot_clear
+from roki_ng.detection.football import camera_geometry
+from roki_ng.detection.football import body_point
+from roki_ng.detection.football import SceneTracker
 from roki_ng.parameters import Parameters
 from roki_ng.wire import Fault
 from test_game import setup, until
@@ -245,7 +249,7 @@ def test_camera_reference_and_pan_are_body_relative(tmp_path):
 def test_lifecycle_never_constructs_odometry_or_starts_localisation(tmp_path, monkeypatch):
     async def run():
         game, sup, session = setup(tmp_path)
-        monkeypatch.setattr('roki_ng.game.GameOdometry', lambda *a: pytest.fail('Odometry forbidden'))
+        monkeypatch.setattr('roki_ng.supervisor.game.game.GameOdometry', lambda *a: pytest.fail('Odometry forbidden'))
         calls = []
         async def step(self):
             assert self.g.odometry is None
@@ -344,7 +348,7 @@ def test_expired_scene_never_dispatches_kick(tmp_path):
 
 
 def test_simple_menu_goal_selection_before_entry_does_not_start_motion():
-    from roki_ng.head_menu import HeadMenu
+    from roki_ng.supervisor.head_menu import HeadMenu
     async def run():
         calls = []
         async def command(op, args):

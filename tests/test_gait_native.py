@@ -1,7 +1,7 @@
 """Offline trajectory regression; requires the real native starkit extension."""
 import pytest
 
-from roki_ng.motion.engine import Engine
+from roki_ng.body.motion.engine import Engine
 from roki_ng.parameters import Parameters
 
 

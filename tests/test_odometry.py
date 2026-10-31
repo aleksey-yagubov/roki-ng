@@ -2,7 +2,9 @@ import math
 
 import pytest
 
-from roki_ng.odometry import GameOdometry, jump_delta, walk_delta
+from roki_ng.body.motion.odometry import GameOdometry
+from roki_ng.body.motion.odometry import jump_delta
+from roki_ng.body.motion.odometry import walk_delta
 from roki_ng.parameters import Parameters
 
 
@@ -52,7 +54,7 @@ def test_partial_cancelled_job_counts_confirmed_segments_once(tmp_path):
 
 
 def test_worker_counts_only_drained_segments_and_retains_partial_result(tmp_path, body_clock):
-    from roki_ng.body import Body
+    from roki_ng.body.runtime import Body
     body = Body({'simulate': True, 'parameters': Parameters(tmp_path).values}, lambda *a: None, lambda *a: None)
     body.command('control.acquire', {})
     body.pose = 'base_stand'
@@ -72,7 +74,7 @@ def test_worker_counts_only_drained_segments_and_retains_partial_result(tmp_path
     job = body.command('job.status', {'job_id': ident})
     assert job['status'] == 'cancelled' and job['execution_uncertain']
     assert len(job['segments']) == 1
-    from roki_ng.legacy_game_motion import omni
+    from roki_ng.body.motion.legacy_game_motion import omni
     order = next(omni(body.parameters, 200, math.pi/2, 0.))
     expected = walk_delta(body.parameters, side_mm=order.side, right_first=False)[1]
     assert job['segments'][0]['dy_m'] == pytest.approx(expected)

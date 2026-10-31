@@ -1,12 +1,12 @@
 import pytest
 
-from roki_ng.body import Body
+from roki_ng.body.runtime import Body
 from roki_ng.parameters import Parameters
 
 
 @pytest.fixture
 def body(tmp_path, monkeypatch, body_clock):
-    from roki_ng.motion import engine
+    import roki_ng.body.motion.engine as engine
 
     class FakeEngine:
         def __init__(self, *args, **kwargs):

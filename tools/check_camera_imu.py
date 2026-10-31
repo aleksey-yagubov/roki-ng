@@ -11,7 +11,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from roki_ng.dataplane import Channel, FRAME_TOPIC, IMU_TOPIC, FRAME_HEADER, IMU_RECORD
+from roki_ng.dataplane import Channel
+from roki_ng.dataplane import FRAME_TOPIC
+from roki_ng.dataplane import IMU_TOPIC
+from roki_ng.dataplane import FRAME_HEADER
+from roki_ng.dataplane import IMU_RECORD
 from roki_ng.synchronization import SequenceJoiner
 
 
@@ -80,7 +84,8 @@ def observe(pipe, timeout):
 
 
 async def check(args):
-    from roki_ng.supervisor import Supervisor, Session
+    from roki_ng.supervisor.supervisor import Supervisor
+    from roki_ng.supervisor.supervisor import Session
     cfg = dict(host="0.0.0.0", port=8099, state_dir="/tmp/roki-ng-capture-check",
                uart="/dev/ttyAMA5", body_disabled=not args.probe_body, skip_mixing=True)
     supervisor = Supervisor(cfg)

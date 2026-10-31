@@ -6,14 +6,22 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from roki_ng.body import Body, RokiHardware
-from roki_ng.body_imu import BodyImu, quaternion_yaw
-from roki_ng.calibration import (ROTATION_KEYS, TITLES, TestPlan as Plan, describe,
-                                 rotation_results, validate_args)
+from roki_ng.body.runtime import Body
+from roki_ng.body.runtime import RokiHardware
+from roki_ng.body.body_imu import BodyImu
+from roki_ng.body.body_imu import quaternion_yaw
+from roki_ng.body.calibration import ROTATION_KEYS
+from roki_ng.body.calibration import TITLES
+from roki_ng.body.calibration import TestPlan as Plan
+from roki_ng.body.calibration import describe
+from roki_ng.body.calibration import rotation_results
+from roki_ng.body.calibration import validate_args
 from roki_ng.client import Client
 from roki_ng.parameters import Parameters
-from roki_ng.supervisor import Supervisor
-from roki_ng.wire import Fault, envelope, pack
+from roki_ng.supervisor.supervisor import Supervisor
+from roki_ng.wire import Fault
+from roki_ng.wire import envelope
+from roki_ng.wire import pack
 
 pytestmark = pytest.mark.usefixtures("body_clock")
 
@@ -58,7 +66,7 @@ def test_catalog_and_descriptions_fit_udp():
 def test_run_variants_calculate_and_send_requested_motion(
         tmp_path, monkeypatch, mode, cycles, step_sign, side_sign, right_first):
     pytest.importorskip("starkit")
-    from roki_ng.motion.engine import Engine
+    from roki_ng.body.motion.engine import Engine
 
     body, _ = make_body(tmp_path)
     body.simulated = False

@@ -7,7 +7,10 @@ import sys
 import time
 import traceback
 
-from .wire import Fault, IPC_LIMIT, pack, unpack
+from roki_ng.wire import Fault
+from roki_ng.wire import IPC_LIMIT
+from roki_ng.wire import pack
+from roki_ng.wire import unpack
 
 
 def run(role, fds):
@@ -80,19 +83,19 @@ def run(role, fds):
                         if driver is not None:
                             raise Fault("busy", "Already initialized")
                         if role == "motherboard":
-                            from .body import Body
+                            from roki_ng.body.runtime import Body
                             driver = Body(body, emit, log)
                         elif role == "stream":
-                            from .stream import Streams
+                            from roki_ng.stream.worker import Streams
                             driver = Streams(body, emit, log)
                         elif role == "camera":
-                            from .camera import Camera
+                            from roki_ng.camera.worker import Camera
                             driver = Camera(body, emit, log)
                         elif role == "detection":
-                            from .detection import Detection
+                            from roki_ng.detection.worker import Detection
                             driver = Detection(body, emit, log)
                         elif role == "localisation":
-                            from .localisation_worker import Localisation
+                            from roki_ng.localisation.worker import Localisation
                             driver = Localisation(body, emit, log)
                         else:
                             raise Fault("invalid_argument", "Unknown worker")

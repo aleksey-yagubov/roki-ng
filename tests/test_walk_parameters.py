@@ -1,7 +1,7 @@
 import pytest
 
-from roki_ng.body import Body
-from roki_ng.motion.engine import Engine
+from roki_ng.body.runtime import Body
+from roki_ng.body.motion.engine import Engine
 from roki_ng.parameters import Parameters
 
 

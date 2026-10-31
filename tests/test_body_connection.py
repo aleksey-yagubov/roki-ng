@@ -2,7 +2,9 @@ import pytest
 
 from types import SimpleNamespace
 
-from roki_ng.body import Body, RokiHardware, SimHardware
+from roki_ng.body.runtime import Body
+from roki_ng.body.runtime import RokiHardware
+from roki_ng.body.runtime import SimHardware
 from roki_ng.parameters import Parameters
 from roki_ng.wire import Fault
 
@@ -21,7 +23,7 @@ def fail():
 
 
 def test_missing_body_keeps_worker_usable(tmp_path, monkeypatch):
-    monkeypatch.setattr("roki_ng.body.RokiHardware", SimHardware)
+    monkeypatch.setattr("roki_ng.body.runtime.RokiHardware", SimHardware)
     body = Body({"parameters": Parameters(tmp_path).values}, lambda *a: None, lambda *a: None)
     body.hardware.connect_body = fail
     for _ in range(10):

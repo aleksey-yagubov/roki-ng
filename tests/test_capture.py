@@ -6,9 +6,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from roki_ng.dataplane import IMU_RECORD
-from roki_ng.imu import ImuPublisher
-from roki_ng.synchronization import CaptureAlignment, SequenceJoiner
-from roki_ng.supervisor import Supervisor, Session
+from roki_ng.motherboard.imu import ImuPublisher
+from roki_ng.synchronization import CaptureAlignment
+from roki_ng.synchronization import SequenceJoiner
+from roki_ng.supervisor.supervisor import Supervisor
+from roki_ng.supervisor.supervisor import Session
 from roki_ng.wire import Fault
 
 
@@ -77,7 +79,7 @@ class FakeChannel:
 
 
 def test_imu_native_batches_invalid_and_out_of_order(monkeypatch):
-    monkeypatch.setattr("roki_ng.imu.Channel", FakeChannel)
+    monkeypatch.setattr("roki_ng.motherboard.imu.Channel", FakeChannel)
     frame = NS(Orientation=NS(X=0,Y=0,Z=0,W=1), Timestamp=NS(TimeS=1,TimeNS=0), SensorID=37)
     events = []
     records = [dict(sequence=n, flags=6 if n == 1 else 7, mode=2,
@@ -235,7 +237,7 @@ def test_join_extended_counters_never_alias_previous_epoch(reverse):
 
 
 def test_imu_rollover_and_late_previous_epoch(monkeypatch):
-    monkeypatch.setattr('roki_ng.imu.Channel',FakeChannel)
+    monkeypatch.setattr('roki_ng.motherboard.imu.Channel',FakeChannel)
     frame=NS(Orientation=NS(X=0,Y=0,Z=0,W=1),Timestamp=NS(TimeS=1,TimeNS=0),SensorID=37)
     records=[dict(sequence=n,flags=1,mode=1,imu=frame) for n in (65534,0,65535,1,0,2)]
     mb=NS(IsConnected=lambda:True,GetStreamDrops=lambda:0,ReadIMUStream=lambda **kw:records)
@@ -245,14 +247,14 @@ def test_imu_rollover_and_late_previous_epoch(monkeypatch):
 
 
 def test_imu_counter_reset_is_not_rollover(monkeypatch):
-    monkeypatch.setattr('roki_ng.imu.Channel',FakeChannel)
+    monkeypatch.setattr('roki_ng.motherboard.imu.Channel',FakeChannel)
     mb=NS(IsConnected=lambda:True,GetStreamDrops=lambda:0,ReadIMUStream=lambda **kw:[dict(sequence=0)])
     imu=ImuPublisher(NS(mb=mb));imu.highest=10000
     with pytest.raises(Fault,match='discontinuity'):imu.tick()
 
 
 def test_imu_continues_across_two_full_counter_periods(monkeypatch):
-    monkeypatch.setattr('roki_ng.imu.Channel',FakeChannel)
+    monkeypatch.setattr('roki_ng.motherboard.imu.Channel',FakeChannel)
     frame=NS(Orientation=NS(X=0,Y=0,Z=0,W=1),Timestamp=NS(TimeS=1,TimeNS=0),SensorID=37)
     batch=[]
     mb=NS(IsConnected=lambda:True,GetStreamDrops=lambda:0,ReadIMUStream=lambda **kw:batch)

@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-from roki_ng.body import Body
+from roki_ng.body.runtime import Body
 from roki_ng.parameters import Parameters
 
 

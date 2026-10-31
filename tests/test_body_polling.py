@@ -5,8 +5,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from roki_ng.body import Body, BodyTransmissionError, RokiHardware
-from roki_ng.calibration import TestPlan as Plan
+from roki_ng.body.runtime import Body
+from roki_ng.body.runtime import BodyTransmissionError
+from roki_ng.body.runtime import RokiHardware
+from roki_ng.body.calibration import TestPlan as Plan
 from roki_ng.parameters import Parameters
 from roki_ng.wire import Fault
 

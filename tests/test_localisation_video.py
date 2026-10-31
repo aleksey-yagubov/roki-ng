@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
-from roki_ng.stream import pipeline_description
-from roki_ng.video_sources import frame_source, settings_for
+from roki_ng.stream.worker import pipeline_description
+from roki_ng.stream.sources import frame_source
+from roki_ng.stream.sources import settings_for
 from roki_ng.wire import Fault
 
 
@@ -15,7 +16,7 @@ def test_localisation_stream_uses_bounded_shared_frames_not_camera():
 
 
 def test_annotation_is_frame_bound_and_does_not_modify_source():
-    from roki_ng.localisation_debug import video_frame
+    from roki_ng.localisation.debug import video_frame
     class Projector:
         def image_points(self,points,q):
             return np.asarray(points)*100+300,np.ones(len(points),bool)

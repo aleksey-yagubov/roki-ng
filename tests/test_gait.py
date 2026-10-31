@@ -7,7 +7,7 @@ from roki_ng.parameters import Parameters
 
 
 def test_step_height_parameter(tmp_path):
-    from roki_ng.body import Body
+    from roki_ng.body.runtime import Body
     from roki_ng.wire import Fault
 
     params = Parameters(tmp_path)
@@ -33,7 +33,7 @@ def test_step_height_parameter(tmp_path):
 
 def test_terminal_cycle_lowers_both_feet(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "starkit", SimpleNamespace(alpha_calculation=lambda *a: [[0.0] * 6]))
-    from roki_ng.motion.engine import Engine
+    from roki_ng.body.motion.engine import Engine
     engine = Engine(Parameters(tmp_path).values)
     list(engine.walk_Initial_Pose(start_mixing=False))
     list(engine.walk_Cycle(12, 0, 0, 0, 1000000))
@@ -44,7 +44,7 @@ def test_terminal_cycle_lowers_both_feet(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize("failed_legs", [("right",), ("left",), ("right", "left")])
 def test_bad_ik_skips_frame_and_completes_cycle(monkeypatch, tmp_path, failed_legs):
-    from roki_ng.body import Body
+    from roki_ng.body.runtime import Body
 
     native = SimpleNamespace(alpha_calculation=lambda *a: [[0.0] * 6])
     monkeypatch.setitem(sys.modules, "starkit", native)

@@ -2,10 +2,11 @@ import math
 
 import pytest
 
-from roki_ng.body import Body
-from roki_ng.calibration import describe
+from roki_ng.body.runtime import Body
+from roki_ng.body.calibration import describe
 from roki_ng.parameters import Parameters
-from roki_ng.recovery import body_position, SLOTS
+from roki_ng.body.recovery import body_position
+from roki_ng.body.recovery import SLOTS
 from roki_ng.wire import Fault
 
 pytestmark = pytest.mark.usefixtures("body_clock")

@@ -4,7 +4,11 @@ import time
 
 import pytest
 
-from roki_ng.football_vision import assemble_goals, own_goal_blocks, own_colour_ahead, shot_clear, render_scene
+from roki_ng.detection.football import assemble_goals
+from roki_ng.detection.football import own_goal_blocks
+from roki_ng.detection.football import own_colour_ahead
+from roki_ng.detection.football import shot_clear
+from roki_ng.detection.football import render_scene
 from test_approach_progress import simple
 
 

@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from roki_ng.body_imu import quaternion_yaw
+from roki_ng.body.body_imu import quaternion_yaw
 from test_simple_football import harness, commands
 
 

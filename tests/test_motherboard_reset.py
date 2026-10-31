@@ -3,9 +3,10 @@ from unittest.mock import MagicMock, AsyncMock
 
 import pytest
 
-from roki_ng.body import Body, RokiHardware
+from roki_ng.body.runtime import Body
+from roki_ng.body.runtime import RokiHardware
 from roki_ng.parameters import Parameters
-from roki_ng.supervisor import Supervisor
+from roki_ng.supervisor.supervisor import Supervisor
 from roki_ng.wire import Fault
 
 
@@ -87,7 +88,7 @@ def test_reset_retries_failed_boot_and_coalesces_requests(tmp_path, monkeypatch)
         server.workers['motherboard'] = MagicMock(call=AsyncMock())
         delays = []
         async def delay(seconds): delays.append(seconds)
-        monkeypatch.setattr('roki_ng.supervisor.asyncio.sleep', delay)
+        monkeypatch.setattr('roki_ng.supervisor.supervisor.asyncio.sleep', delay)
         server.worker_event('motherboard', 'motherboard.reset_required', {})
         task = server.motherboard_reset_task
         server.worker_event('motherboard', 'motherboard.reset_required', {})
