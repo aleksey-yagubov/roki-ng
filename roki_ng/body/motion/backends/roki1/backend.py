@@ -8,8 +8,11 @@ NAME = 'roki1'
 ASSETS = Path(__file__).parent
 RECOVERY = {'stomach': 'Roki_1_Get_UP_Stomach', 'back': 'Roki_1_Get_UP_Face_Up',
             'left': 'Get_Up_Left', 'right': 'Get_Up_Right'}
-# Original final stance; corrected in the following trajectory commit.
-STAND_HEIGHT = 233.
+# The original 233 mm target exceeds this model's 232 mm vertical chain.
+# Keep 2 mm extension margin: 231 mm fails with the original 16 mm forward
+# foot offset after a long stride. Preserve that offset and the original exit.
+# This is a reachable nominal pose, not a field stability calibration.
+STAND_HEIGHT = 230.
 LEAD_STRIDE_SCALE = 2.5
 ZERO_FIRST_RIGHT = True
 HALF_LIFT = False
