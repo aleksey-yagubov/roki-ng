@@ -1,3 +1,4 @@
+from roki_ng.body.motion.backends import load as load_motion_backend
 import asyncio
 import math
 from types import SimpleNamespace
@@ -269,7 +270,7 @@ def test_native_ik_rigid_pitch_rotation_mainly_changes_hip(tmp_path):
     from roki_ng.body.motion.engine import Engine
     params = Parameters(tmp_path).values
     for centered in (False, True):
-        engine = Engine(params)
+        engine = Engine(params, backend=load_motion_backend('roki2'))
         baseline = engine.crouch_target(centered)
         old = {(v.Id, v.Sio): v.Data for v in baseline}
         sine, cosine = math.sin(math.radians(2)), math.cos(math.radians(2))

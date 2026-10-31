@@ -1,4 +1,5 @@
 """Offline trajectory regression; requires the real native starkit extension."""
+from roki_ng.body.motion.backends import load as load_motion_backend
 import pytest
 
 from roki_ng.body.motion.engine import Engine
@@ -31,7 +32,7 @@ def test_walk_finishes_all_frames(tmp_path, step, side, yaw, right_first, height
     params.update({"walk.step_height_mm": height, "walk.body_tilt_forward": tilt,
                    "walk.body_tilt_backward": tilt, "walk.sole_skew": skew})
     logs = []
-    engine = Engine(params, log=lambda *a: logs.append(a))
+    engine = Engine(params, log=lambda *a: logs.append(a), backend=load_motion_backend('roki2'))
     engine.first_Leg_Is_Right_Leg = right_first
     commands = list(engine.walk_Initial_Pose(start_mixing=False))
     for cycle in range(10):
@@ -51,7 +52,7 @@ def test_kick_on_fresh_engine(tmp_path, right, power):
     pytest.importorskip("starkit")
     params = Parameters(tmp_path).values
     logs = []
-    engine = Engine(params, log=lambda *args: logs.append(args))
+    engine = Engine(params, log=lambda *args: logs.append(args), backend=load_motion_backend('roki2'))
     engine.kick_power = power
     commands = list(engine.kick(right))
     frames = [cmd for cmd in commands if cmd[0] == "servo"]
@@ -64,6 +65,6 @@ def test_kick_on_fresh_engine(tmp_path, right, power):
 def test_kick_does_not_depend_on_previous_stride(tmp_path):
     pytest.importorskip("starkit")
     params = Parameters(tmp_path).values
-    fresh, stale = Engine(params), Engine(params)
+    fresh, stale = Engine(params, backend=load_motion_backend('roki2')), Engine(params, backend=load_motion_backend('roki2'))
     stale.stepLength = -64
     assert list(fresh.kick(True)) == list(stale.kick(True))

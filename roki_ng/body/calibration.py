@@ -128,7 +128,8 @@ class TestPlan:
     def get_engine(self):
         if self.engine is None:
             from roki_ng.body.motion.engine import Engine
-            self.engine = Engine(self.parameters)
+            self.engine = Engine(self.parameters, log=self.body.log, backend=self.body.backend)
+            self.body.log('INFO', f'Calibration motion backend: {self.body.backend.NAME}')
         return self.engine
 
     def gait(self, cycles, step=0, side=0, right_leg=True, rotation=None, ramp=False):

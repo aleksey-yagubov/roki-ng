@@ -1,3 +1,4 @@
+from roki_ng.body.motion.backends import load as load_motion_backend
 import math
 import sys
 
@@ -65,7 +66,7 @@ def test_invalid_units_or_value(units, angle):
 @pytest.mark.parametrize("centered", [False, True])
 def test_crouch_targets_reachable(body, height, centered):
     body.parameters["walk.gait_height_mm"] = height
-    engine = Engine(body.parameters)
+    engine = Engine(body.parameters, backend=load_motion_backend('roki2'))
     values = engine.crouch_target(centered)
     assert len(values) == 23
     assert all(0 <= v.Data <= 16383 for v in values)

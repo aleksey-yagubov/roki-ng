@@ -47,6 +47,12 @@ are saved; subsequent startups preserve operator values. `params.describe.defaul
 returns the selected model's default for the GUI reset button. Missing keys use
 current effective defaults.
 
+Internal motion engines require an explicit backend; they must never repeat
+automatic model selection. Calibration TestPlan uses the owning body's backend
+and log sink, just like manual/game movement. This prevents an explicitly selected
+Roki1 from accidentally using Roki2 geometry when both backend folders are present.
+Camera projection helpers likewise require the selected model geometry explicitly.
+
 Roki1 retains original trajectories and IK-frame skipping, as requested. Standing
 uses the original interpolated exit at 230 mm; see ROKI1_REACHABILITY.md. Physical stability
 and kick contact remain unverified.

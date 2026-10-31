@@ -1,3 +1,4 @@
+from roki_ng.body.motion.backends import load as load_motion_backend
 import sys
 from types import SimpleNamespace
 
@@ -34,7 +35,7 @@ def test_step_height_parameter(tmp_path):
 def test_terminal_cycle_lowers_both_feet(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "starkit", SimpleNamespace(alpha_calculation=lambda *a: [[0.0] * 6]))
     from roki_ng.body.motion.engine import Engine
-    engine = Engine(Parameters(tmp_path).values)
+    engine = Engine(Parameters(tmp_path).values, backend=load_motion_backend('roki2'))
     list(engine.walk_Initial_Pose(start_mixing=False))
     list(engine.walk_Cycle(12, 0, 0, 0, 1000000))
     assert engine.ztl > -engine.gaitHeight

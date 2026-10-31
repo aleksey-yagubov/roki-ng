@@ -1,15 +1,16 @@
 """Cooperative gait generator; no camera, filesystem calibration or global app."""
 
 from roki_ng.body.motion.gait import GaitAlgorithms
-from roki_ng.body.motion.backends import load
 import logging
 from roki_ng.body.motion.gait import Servo
 from roki_ng.wire import Fault
 
 
 class Engine(GaitAlgorithms):
-    def __init__(self, parameters, log=None, *, backend=None):
-        self.backend = backend or load()
+    def __init__(self, parameters, log=None, *, backend):
+        if backend is None:
+            raise Fault('configuration', 'Motion engine requires the selected body backend')
+        self.backend = backend
         self.__dict__.update(self.backend.Robot().__dict__)
         self.log = log or (lambda level, message: logging.getLogger(__name__).log(
             getattr(logging, level), message))

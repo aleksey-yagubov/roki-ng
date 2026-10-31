@@ -1,3 +1,4 @@
+from roki_ng.body.motion.backends import load as load_motion_backend
 import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -20,7 +21,7 @@ def test_yield_follows_physical_direction_not_signed_argument(
         tmp_path, right_first, rotation, coefficient):
     params = Parameters(tmp_path).values
     def amplitude(values):
-        engine = Engine(values)
+        engine = Engine(values, backend=load_motion_backend('roki2'))
         engine.first_Leg_Is_Right_Leg = right_first
         angles = []
         def capture(hands_on=True):

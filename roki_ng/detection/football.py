@@ -8,10 +8,7 @@ from roki_ng.body.calibration import wrap
 TICK = .00058909
 
 
-def camera_geometry(p, pan, tilt, model=None):
-    if model is None:
-        from roki_ng.body.motion.backends import load
-        model = load().Robot.camera
+def camera_geometry(p, pan, tilt, model):
     from roki_ng.vision.camera_geometry import height
     neck = model.neck_m
     ref = model.reference_tilt*TICK
