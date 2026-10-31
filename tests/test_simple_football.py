@@ -238,12 +238,13 @@ def test_single_post_and_ambiguous_pairs_not_goal():
 
 def test_camera_reference_and_pan_are_body_relative(tmp_path):
     p = Parameters(tmp_path).values
-    p.update({'game.camera_height_m': .43, 'game.camera_reference_tilt': -1000, 'game.camera_forward_m': .04})
-    geometry = camera_geometry(p, 0, -1000)
+    from roki_ng.vision.camera_geometry import CameraGeometry
+    model = CameraGeometry(height_m=.43, reference_tilt=-1000, forward_m=.04)
+    geometry = camera_geometry(p, 0, -1000, model)
     assert geometry['height'] == .43
     assert body_point([1., 0.], geometry) == pytest.approx([1.04, 0.])
-    assert camera_geometry(p, 0, -1500)['height'] < .43
-    assert body_point([1., 0.], camera_geometry(p, -1778, -1000))[1] > .85
+    assert camera_geometry(p, 0, -1500, model)['height'] < .43
+    assert body_point([1., 0.], camera_geometry(p, -1778, -1000, model))[1] > .85
 
 
 def test_lifecycle_never_constructs_odometry_or_starts_localisation(tmp_path, monkeypatch):

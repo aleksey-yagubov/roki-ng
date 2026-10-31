@@ -89,7 +89,9 @@ class OriginalStrategy:
             return None
         if not await self._move('game.head', {'pan': 0, 'tilt': p['game.head_tilt']}):
             return None
-        await self._call('detection', 'ball.geometry', {'height_m': p['game.camera_height_m'], 'stamp': time.monotonic()})
+        from roki_ng.vision.camera_geometry import height
+        await self._call('detection', 'ball.geometry', {
+            'height_m': height(p, self.s.params.backend.Robot.camera), 'stamp': time.monotonic()})
         if not self._same_plan(revision):
             return None
         await self._open_localisation(p)

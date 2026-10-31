@@ -25,6 +25,8 @@ def main():
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8093)
     parser.add_argument("--state-dir", default="/var/lib/roki-ng")
+    parser.add_argument("--robot-model", choices=("roki2", "roki1"), default=None,
+                        help="Body backend; default: sole installed model, or roki2 when both installed")
     parser.add_argument("--uart", default="/dev/ttyAMA5")
     parser.add_argument("--gpiochip", help="Only search this chip for userspace-motherboard-reset")
     parser.add_argument("--mixing-slot", type=int, default=3)
@@ -35,6 +37,12 @@ def main():
     parser.add_argument("--test-video", action="store_true", help="GStreamer videotestsrc and software encoder")
     parser.add_argument("--skip-bootstrap", action="store_true", help="Firmware is already running; skip GPIO/bootloader")
     config = vars(parser.parse_args())
+    from roki_ng.body.motion.backends import load
+    from roki_ng.wire import Fault
+    try:
+        config['robot_model'] = load(config['robot_model']).NAME
+    except Fault as exc:
+        parser.error(str(exc))
     Path(config["state_dir"]).mkdir(parents=True, exist_ok=True)
     with open(Path(config["state_dir"]) / "supervisor.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

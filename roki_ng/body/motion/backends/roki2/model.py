@@ -2,6 +2,8 @@
 #  Copyright STARKIT Soccer team of MIPT
 
 class Robot:
+    from roki_ng.vision.camera_geometry import CameraGeometry
+    camera = CameraGeometry(height_m=.4068)
 
     def __init__(self):
 
@@ -80,3 +82,6 @@ class Robot:
             ,'head0','head12', 'hand_right_11', 'hand_left_11', 'hand_right_14', 'hand_left_14']
 
         self.hand_joints =[6, 7, 8, 9, 17, 18, 19, 20, 23, 24, 25, 26]
+
+        from roki_ng.body.motion.mapping import JointMapping
+        self.mapping = JointMapping(split_knee=True)

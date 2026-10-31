@@ -112,7 +112,7 @@ def test_diagnostic_reasons_are_actual_game_decisions(tmp_path, turf, point, rea
         if point is None:
             raise ValueError('above horizon')
         return point
-    args = image, Parameters(tmp_path).values, SimpleNamespace(ground_point=project), [0, 0, 0, 1]
+    args = image, Parameters(tmp_path).values, SimpleNamespace(ground_point=project, height=.4068), [0, 0, 0, 1]
     debug = {}
     result = ball_candidates(*args, debug=debug)
     assert result == ball_candidates(*args)

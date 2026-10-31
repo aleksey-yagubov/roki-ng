@@ -230,10 +230,10 @@ def test_original_series_cancellation_keeps_only_confirmed_cycles(tmp_path, body
 
 
 def test_camera_height_tracks_original_leg_and_neck_geometry(tmp_path):
-    from roki_ng.body.motion.model import Robot
+    from roki_ng.body.motion.backends.roki2.model import Robot
     p, model = Parameters(tmp_path).values, Robot()
     nominal = camera_height(p, model, None, 0., 0., 0, p['game.head_tilt'])
-    assert nominal == pytest.approx(p['game.camera_height_m'])
+    assert nominal == pytest.approx(model.camera.height_m)
     engine = SimpleNamespace(xtr=0, xtl=0, ytr=-model.d10, ytl=model.d10, ztr=-180, ztl=-180)
     lowered = camera_height(p, model, engine, 0., 0., 0, p['game.head_tilt'])
     assert lowered == pytest.approx(nominal-(-model.ztr0-180)/1000)

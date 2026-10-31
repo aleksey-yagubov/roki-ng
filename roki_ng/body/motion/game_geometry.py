@@ -4,11 +4,13 @@ import math
 
 def camera_height(parameters, model, engine, pitch_deg, roll_deg, pan, tilt):
     pitch, roll = math.radians(pitch_deg), math.radians(roll_deg)
-    neck = parameters['game.neck_height_m']
+    if parameters.get('camera.custom_height_m', 0.) != 0:
+        return parameters['camera.custom_height_m']
+    neck = model.camera.neck_m
     tick = .00058909
     # Calibrated height is at the configured observation tilt in base_stand.
-    z = (parameters['game.camera_height_m'] + model.ztr0/1000
-         + neck*(math.cos(tilt*tick)-math.cos(parameters['game.head_tilt']*tick)))
+    z = (model.camera.height_m + model.ztr0/1000
+         + neck*(math.cos(tilt*tick)-math.cos(model.camera.reference_tilt*tick)))
     camera = (neck*math.sin(-tilt*tick)*math.cos(pan*tick),
               neck*math.sin(-tilt*tick)*math.sin(pan*tick), z)
     def world_z(vector):

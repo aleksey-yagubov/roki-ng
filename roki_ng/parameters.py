@@ -26,16 +26,13 @@ COLOUR_DEFAULTS = {
 SCHEMA = {
     'game.simple_football.entry_forward_mm': ('float', 200., 0., 500., 'next_game', 'Simple football left/right entry distance, millimetres'),
     'game.simple_football.kickoff_side': ('str', 'left', None, None, 'next_game', 'Simple football kickoff side: left or right'),
-    'game.camera_reference_tilt': ('int', -1500, -2600, 950, 'next_game', 'Head tilt at which camera height/forward offset were measured in base_stand'),
-    'game.camera_forward_m': ('float', 0., -.2, .3, 'next_game', 'Optical centre forward offset from body origin at reference tilt; measure for robot'),
+    'camera.custom_height_m': ('float', 0., 0., 3., 'next_job', 'Optical centre height for stand-mounted camera tests, metres: 0 uses body model; otherwise 0.05..3. Restart detection/localisation after changing.'),
     'game.use_visual_localisation': ('bool', True, None, None, 'next_game', 'Use stationary camera field corrections during game; false keeps IMU/odometry and ball detection. Applies on next game start.'),
     "motion.kick_type": ("str", "software", None, None, "next_job", "Тип удара: software — Python; controller — оригинальный roki2met, слот 31. Применяется к следующему ручному/игровому удару; менять при остановленной игре."),
     "power.voltage_scale": ("float", 1.0, 0.5, 1.5, "next_job", "Калибровочный множитель напряжения аккумулятора: voltage_v = ADC * 10 / 2702 * множитель. Больше: выше показание. Поправка конкретной платы по мультиметру, не процент заряда. Изменять между движениями; применяется к следующему snapshot."),
     'game.forward.kick_off_ride': ('bool', True, None, None, 'next_game', 'Enable immediate center kickoff for forward or simple_football; delayed and side entries skip it'),
-    'game.camera_height_m': ('float', .4068, .2, .8, 'next_game', 'Measured optical centre height in base_stand observation posture, metres'),
     'game.head_tilt': ('int', -1500, -2600, 950, 'next_game', 'FIRA head tilt during centred observation and lateral search'),
     'game.ball_diameter_m': ('float', .09, .02, .25, 'next_game', 'Measured ball diameter (90 mm), metres; centre-ray projection subtracts its radius'),
-    'game.neck_height_m': ('float', .03676, .001, .15, 'next_game', 'Original HEIGHT_OF_NECK (36.76 mm), metres'),
     'game.kick_approach_mm': ('float', 60., 20., 300., 'next_game', 'Original KICK_ADJUSTMENT_DISTANCE_1: verify-pass reference distance, millimetres'),
     'game.kick_distance_mm': ('float', 100., 20., 300., 'next_game', 'Original KICK_ADJUSTMENT_DISTANCE_2: fine-adjustment forward threshold, millimetres; a closer aligned ball is kicked, not moved backwards'),
     'game.kick_offset_mm': ('float', 52., 10., 150., 'next_game', 'Original KICK_OFFSET_OF_BALL, lateral millimetres'),
@@ -45,7 +42,6 @@ SCHEMA = {
     'camera.analogue_gain': ('float',1.,1.,16.,'next_request','Manual analogue gain'),
     'camera.ae_enabled': ('bool',False,None,None,'next_request','Automatic exposure; manual values retained when enabled'),
     'camera.awb_enabled': ('bool',False,None,None,'next_request','Automatic white balance; manual values retained when enabled'),
-    'localisation.camera_height_m': ('float',.4068,.2,.8,'next_localisation','Optical centre height; nominal default, measure for robot posture'),
     'localisation.goal_foot_tolerance_m': ('float',.35,.05,1.,'next_localisation','Maximum projected post-foot distance from a mapped goal post'),
     'localisation.goal_height_tolerance_ratio': ('float',.5,.05,1.,'next_localisation','Allowed relative error of calibrated coloured post height'),
     'localisation.max_speed_m_s': ('float',.5,.01,2.,'next_localisation','Maximum plausible translation speed; metres per second'),
@@ -117,9 +113,20 @@ def validate_colour_ranges(values):
 
 
 class Parameters:
-    def __init__(self, directory):
+    def __init__(self, directory, robot_model=None):
+        from roki_ng.body.motion.backends import load
+        self.backend = load(robot_model)
+        robot_model = self.backend.NAME
+        self.robot_model = robot_model
         self.path = Path(directory) / "parameters.json"
+        binding = Path(directory) / 'robot-model.json'
+        if binding.exists():
+            if json.loads(binding.read_text()).get('model') != robot_model:
+                raise Fault('configuration', 'State directory belongs to another robot model; choose a separate --state-dir')
+        elif self.path.exists() and robot_model != 'roki2':
+            raise Fault('configuration', 'Unlabelled existing settings belong to roki2; use a fresh --state-dir for roki1')
         self.values = {k: copy.deepcopy(v[1]) for k, v in SCHEMA.items()}
+        self.values.update({k: self.validate(k, v) for k, v in self.backend.MOTION_DEFAULTS.items()})
         self.extra = {}
         if self.path.exists():
             stored = json.loads(self.path.read_text())
@@ -132,6 +139,8 @@ class Parameters:
                     self.extra[key] = value
         validate_colour_ranges(self.values)
         self.save(self.values)
+        if not binding.exists():
+            binding.write_text(json.dumps({'model': robot_model}) + '\n')
 
     def describe(self, key):
         if key not in SCHEMA:
@@ -139,15 +148,24 @@ class Parameters:
         kind, default, low, high, apply, description = SCHEMA[key]
         result=dict(key=key, type=kind, default=copy.deepcopy(default), min=low, max=high,
                     apply=apply, description=description)
+        if key in self.backend.MOTION_DEFAULTS:
+            result['default'] = copy.deepcopy(self.backend.MOTION_DEFAULTS[key])
         if key in field_config.FIELDS:result['fields']=field_config.FIELDS[key]
         if key == "motion.kick_type":
-            result['choices'] = ['software', 'controller']
+            result['choices'] = ['software', 'controller'] if self.backend.CONTROLLER_KICK else ['software']
         if key == 'game.simple_football.kickoff_side':
             result['choices'] = ['left', 'right']
         return result
 
     def validate(self, key, value):
         meta = self.describe(key)
+        if key == 'camera.custom_height_m':
+            height = number({key: value}, key, None, 0., 3.)
+            if 0 < height < .05:
+                raise Fault('invalid_argument', 'Camera height must be 0 (model) or 0.05..3 metres')
+            return height
+        if key == 'stabilization.enabled' and value is True and not self.backend.STABILIZATION:
+            raise Fault('unsupported', 'Crouch stabilization is not validated for this robot model')
         if 'choices' in meta:
             return choice({key: value}, key, None, meta['choices'])
         if key in field_config.FIELDS:return field_config.validate(key,value)

@@ -198,9 +198,9 @@ def test_parallel_lines_do_not_claim_constrained_geometry():
 def test_configuration_id_changes_only_for_metric_configuration():
     from roki_ng.localisation.field_config import configuration_id
     from roki_ng.localisation.field_config import DEFAULTS
-    p=DEFAULTS|{'match.own_goal':0,'localisation.camera_height_m':.4068}
+    p=DEFAULTS|{'match.own_goal':0,'camera.custom_height_m':0.}
     assert configuration_id(p)==configuration_id(p|{'vision.field_auto':False})
-    assert configuration_id(p)!=configuration_id(p|{'localisation.camera_height_m':.5})
+    assert configuration_id(p)!=configuration_id(p|{'camera.custom_height_m':.5})
     assert configuration_id(p)!=configuration_id(p|{'match.own_goal':1})
 
 

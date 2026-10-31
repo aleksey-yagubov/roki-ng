@@ -7,12 +7,6 @@ from pathlib import Path
 from roki_ng.wire import Fault
 
 
-SLOTS = {
-    "stomach": "Roki_2_Get_UP_Stomach",
-    "back": "Roki_2_Get_UP_Face_Up",
-    "right": "Get_Up_Right",
-    "left": "Get_Up_Left",
-}
 
 
 def body_position(quaternion):
@@ -59,8 +53,8 @@ def ensure_upright(body):
         return
     job["initial_posture"] = position
     if position != "upright":
-        name = SLOTS[position]
-        rows = json.loads((Path(__file__).resolve().parents[1] / "assets" / "slots" / f"{name}.json").read_text())[name]
+        name = body.backend.RECOVERY[position]
+        rows = json.loads((body.backend.ASSETS / "slots" / f"{name}.json").read_text())[name]
         body._validate_rows(rows)
         job.update(stage="getting_up", recovery_slot=name)
         body.emit("job.progress", dict(job))

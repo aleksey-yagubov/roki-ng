@@ -95,6 +95,6 @@ def configuration_id(parameters):
     import hashlib
     import json
     selected={key:value for key,value in parameters.items()
-              if key.startswith(('field.','localisation.')) or key == 'match.own_goal'}
+              if key.startswith(('field.','localisation.')) or key in ('match.own_goal', 'camera.custom_height_m')}
     return hashlib.sha256(json.dumps(selected,sort_keys=True,separators=(',',':'),
                                     allow_nan=False).encode()).hexdigest()[:16]

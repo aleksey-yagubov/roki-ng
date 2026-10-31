@@ -565,7 +565,6 @@ class Goalkeeper(OriginalStrategy):
                 self.visual_owned = True
                 # Same stationary optical height as the game's ball projection.
                 effective = parameters | {k:v for k,v in self.s.params.values.items() if k.startswith('vision.')}
-                effective['localisation.camera_height_m'] = parameters['game.camera_height_m']
                 capture = uuid.uuid4().hex
                 await self._call('localisation', 'localisation.start', dict(mode='game', prior=prior,
                                  capture_id=capture, parameters=effective, unicam_minus_stm=sync['unicam_minus_stm']), timeout=5)

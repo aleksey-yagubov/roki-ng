@@ -9,6 +9,8 @@ from roki_ng.wire import Fault
 
 class Localisation:
     def __init__(self, config, emit, log):
+        from roki_ng.body.motion.backends import load
+        self.camera_model = load(config.get('robot_model')).Robot.camera
         self.directory=Path(config['state_dir'])/'localisation'
         self.emit,self.log=emit,log
         self.thread=None
@@ -124,7 +126,8 @@ class Localisation:
             self.parameters=self.parameters | args.get('parameters',{})
             from roki_ng.localisation.field_config import configuration_id
             configuration=configuration_id(self.parameters)
-            projector=GroundProjection(self.directory,self.parameters['localisation.camera_height_m'])
+            from roki_ng.vision.camera_geometry import height
+            projector=GroundProjection(self.directory,height(self.parameters, self.camera_model))
             engine=PoseFilter(args['prior'],count=2048,parameters=self.parameters)
             offset=args['unicam_minus_stm']
             if type(offset) is not int or abs(offset)>2**32:

@@ -11,10 +11,11 @@ def body_clock(monkeypatch):
     import roki_ng.body.body_imu as body_imu
     import roki_ng.body.power as body_power
     import roki_ng.body.servos as body_servos
+    import roki_ng.body.communication.transports.motherboard as transport
     now = [time.monotonic()]
     clock = SimpleNamespace(monotonic=lambda: now[0],
                             monotonic_ns=lambda: int(now[0] * 1e9))
-    for module in (body, body_imu, body_power, body_servos):
+    for module in (body, body_imu, body_power, body_servos, transport):
         monkeypatch.setattr(module, "time", clock)
     original_tick = body.Body.tick
 

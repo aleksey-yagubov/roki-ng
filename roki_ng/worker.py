@@ -83,8 +83,8 @@ def run(role, fds):
                         if driver is not None:
                             raise Fault("busy", "Already initialized")
                         if role == "motherboard":
-                            from roki_ng.body.runtime import Body
-                            driver = Body(body, emit, log)
+                            from roki_ng.motherboard.worker import create
+                            driver = create(body, emit, log)
                         elif role == "stream":
                             from roki_ng.stream.worker import Streams
                             driver = Streams(body, emit, log)

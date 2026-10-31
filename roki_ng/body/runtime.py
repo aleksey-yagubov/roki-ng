@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import time
 import uuid
 
-from roki_ng.body.motion.model import Robot
+from roki_ng.body.motion.backends import load
 from roki_ng.wire import Fault
 from roki_ng.wire import boolean
 from roki_ng.wire import choice
@@ -33,294 +33,8 @@ from roki_ng.body.controller_kick import STOP_SLOT
 from roki_ng.body.controller_kick import KICK_PARAMETERS
 from roki_ng.body.controller_kick import KickWitness
 
-ASSETS = Path(__file__).resolve().parents[1] / "assets"
 
-
-class BodyTransmissionError(Fault):
-    def __init__(self, message, count=1):
-        super().__init__("hardware_error", message)
-        self.count = count
-
-
-class RokiHardware:
-    forward_pending = False
-    controller_pending = False
-
-    def __init__(self, config):
-        import Roki
-        self.Roki = Roki
-        self.mb = Roki.Motherboard()
-        self.check(self.mb.ConfigureACM(timeout_ms=1000), self.mb)
-        self.check(self.mb.StopStrobeCapture(), self.mb)
-        self.check(self.mb.ConfigureBody(200, 1), self.mb)
-        self.rcb = Roki.Rcb4(self.mb)
-        self.config = config
-        self.mixing_started = False
-        self.check(self.mb.SetBodyQueuePeriod(config["parameters"]["motion.frame_ms"]), self.mb)
-        self.check(self.mb.ResetBodyQueue(), self.mb)
-        self.busy_until = 0
-        self.frame_s = config["parameters"]["motion.frame_ms"] / 1000
-        self.body_failures = self.mb.GetStatus()["body_failures"]
-
-    def probe(self):
-        self._direct_available()
-        self.check(self.rcb.checkAcknowledge(), self.rcb, forwarded=True)
-
-    def connect_body(self):
-        # Flush pending host->body traffic before checking a reattached cable.
-        self.reset()
-        self.check_queue()
-        self.probe()
-        self.body_failures = self.mb.GetStatus()["body_failures"]
-
-    def reconnect_motherboard(self):
-        # Reuse the client: its retired RPC IDs protect against late responses.
-        # Keep controller_pending until its STOP has actually been acknowledged.
-        self.check(self.mb.ConfigureACM(timeout_ms=1000), self.mb)
-        self.check(self.mb.StopStrobeCapture(), self.mb)
-        self.check(self.mb.ConfigureBody(200, 1), self.mb)
-        self.check(self.mb.SetBodyQueuePeriod(round(self.frame_s * 1000)), self.mb)
-        self.forward_pending = False
-        self.body_failures = self.mb.GetStatus()['body_failures']
-        self.mixing_started = False
-        self.check(self.mb.ResetBodyQueue(), self.mb)
-        self.busy_until = time.monotonic()
-        # connect_body() will stop a possibly running controller slot before
-        # acknowledging the body. A missing Zubr must not reboot healthy STM.
-
-    def prepare_motion(self):
-        self._forward_available()
-        if not self.mixing_started and not self.config.get("skip_mixing", False):
-            self._direct_available()
-            self.check(self.rcb.motionPlay(self.config.get("mixing_slot", 3)), self.rcb, forwarded=True)
-            self.mixing_started = True
-
-    def check(self, ok, source, forwarded=False):
-        if not ok:
-            # STM rejects a forward request while a queued transaction owns UART8.
-            # No command was sent, and this does not mean the cable disconnected.
-            status = self.mb.GetLastStatus()
-            if status == 5:
-                raise Fault("body_busy", source.GetError(), True)
-            if forwarded and status in (8, 9, 10):
-                # Firmware counts failed synchronous reads and queued movement
-                # in the same counter. Account for THIS transaction exactly
-                # once; never swallow other queued failures by copying GetStatus.
-                self.body_failures = (self.body_failures + 1) % (2**32)
-            elif forwarded and status == 255:
-                # Host lost the response; STM may still be executing this
-                # read/command. Resolve it before accepting another movement.
-                self.forward_pending = True
-            raise Fault("hardware_error", source.GetError())
-
-    def _forward_available(self):
-        if self.forward_pending:
-            raise Fault("body_busy", "Previous direct transaction outcome pending", True)
-        if self.controller_pending:
-            raise Fault('body_busy', 'Controller kick completion/stop not confirmed', True)
-
-    def _direct_available(self):
-        if not self.telemetry_ready():
-            raise Fault("body_busy", "Direct transaction deferred while queue owns UART", True)
-
-    def send(self, values, frames, pause):
-        self._forward_available()
-        servos = []
-        for value in values:
-            servo = self.Roki.Rcb4.ServoData()
-            servo.Id, servo.Sio, servo.Data = value.Id, value.Sio, value.Data
-            servos.append(servo)
-        self.check(self.rcb.setServoPosAsync(servos, int(frames), int(pause)), self.rcb)
-        self.busy_until = time.monotonic() + frames * self.frame_s
-
-    def drained(self):
-        status = self.check_queue()
-        return (status["body_queue_size"] == 0 and not status["body_busy"]
-                and time.monotonic() >= self.busy_until)
-
-    def check_queue(self):
-        try:
-            status = self.mb.GetStatus()
-        except RuntimeError as exc:
-            raise Fault("hardware_error", f"Reading STM body status: {exc}") from exc
-        previous = self.body_failures
-        if self.forward_pending:
-            if status["body_busy"]:
-                return status
-            self.forward_pending = False
-            # With no newly submitted movements, at most one increment belongs
-            # to the direct transaction already reported to its caller.
-            if status["body_failures"] != previous:
-                previous = self.body_failures = (previous + 1) % (2**32)
-        self.body_failures = status["body_failures"]
-        if self.body_failures != previous:
-            # A later successful packet clears last_body_error, not this counter.
-            delta = (self.body_failures - previous) % (2**32)
-            count = delta if delta < 2**31 else 1  # Firmware reboot, not billions of failures.
-            raise BodyTransmissionError(f"STM body transmission failures: {previous} -> "
-                                        f"{self.body_failures}; last status {status['last_body_error']}", count)
-        return status
-
-    def telemetry_ready(self):
-        try:
-            status = self.mb.GetStatus()
-        except RuntimeError as exc:
-            raise Fault("hardware_error", f"Reading telemetry readiness: {exc}") from exc
-        # No direct read may overlap queued execution. Defer also when queue
-        # failures still need to be collected by the important-operation path.
-        return (not self.forward_pending and status["body_failures"] == self.body_failures
-                and status["body_queue_size"] == 0 and not status["body_busy"])
-
-    def _read_ram(self, address, size):
-        self._direct_available()
-        try:
-            ok, raw = self.rcb.moveRamToComCmdSynchronize(address, size)
-        except (RuntimeError, OSError) as exc:
-            self.forward_pending = True
-            raise Fault("hardware_error", f"Body RAM read failed: {exc}") from exc
-        self.check(ok, self.rcb, forwarded=True)
-        return raw
-
-    def reset(self):
-        self.check(self.mb.ResetBodyQueue(), self.mb)
-        self.busy_until = time.monotonic()
-        if self.controller_pending:
-            # Clearing STM's queue cannot stop a script already running in Zubr.
-            # Keep the latch until STOP is acknowledged, including reconnects.
-            self.check_queue()  # Resolve an outstanding/lost direct response first.
-            self._direct_available()
-            self._controller_call(self.rcb, self.rcb.motionPlay, STOP_SLOT)
-            self.controller_pending = False
-            self.mixing_started = False
-
-    def _controller_call(self, source, method, *args):
-        try:
-            result = method(*args)
-        except (RuntimeError, OSError) as exc:
-            self.forward_pending = True
-            raise Fault('hardware_error', f'Controller transaction outcome unknown: {exc}') from exc
-        self.check(result[0] if isinstance(result, tuple) else result, source, forwarded=True)
-        return result
-
-    def controller_write(self, address, value):
-        self._direct_available()
-        if not hasattr(self, 'zubr'):
-            self.zubr = self.Roki.Zubr(self.mb)
-        self._controller_call(self.zubr, self.zubr.memISet, address, value)
-
-    def controller_read(self, address):
-        self._direct_available()
-        ok, value = self._controller_call(self.zubr, self.zubr.memIGet, address)
-        return value
-
-    def controller_start(self):
-        self._direct_available()
-        # A lost ACK may mean the kick DID start. Never replay it.
-        self.controller_pending = True
-        try:
-            self._controller_call(self.rcb, self.rcb.motionPlay, KICK_SLOT)
-        except Fault as exc:
-            if exc.code == 'body_busy':
-                # STM explicitly rejected forwarding; no slot was started.
-                self.controller_pending = False
-            raise
-
-    def controller_completed(self):
-        self.controller_pending = False
-        self.mixing_started = self.config.get('mixing_slot', 3) == 3
-
-    def head(self, values, frames):
-        self._direct_available()
-        servos = []
-        for value in values:
-            servo = self.Roki.Rcb4.ServoData()
-            servo.Id, servo.Sio, servo.Data = value.Id, value.Sio, value.Data
-            servos.append(servo)
-        self.check(self.rcb.setServoPos(servos, frames), self.rcb, forwarded=True)
-
-    def body_quaternion(self):
-        raw = self._read_ram(0x0060, 8)
-        if len(raw) != 8:
-            raise Fault("imu_invalid", "Body IMU response must contain 8 bytes")
-        return tuple(value / 16384 for value in struct.unpack("<hhhh", bytes(raw)))
-
-    def body_positions(self):
-        raw = self._read_ram(0x0070, 60)
-        if len(raw) != 60:
-            raise Fault("servo_data_invalid", "Body positions response must contain 60 bytes")
-        return struct.unpack("<30h", bytes(raw))
-
-    def body_power_adc(self):
-        raw = self._read_ram(0x00CC, 2)
-        if len(raw) != 2:
-            raise Fault("power_data_invalid", "Body power response must contain 2 bytes")
-        return struct.unpack("<H", bytes(raw))[0]
-
-
-class SimHardware:
-    controller_pending = False
-
-    def controller_write(self, address, value):
-        pass
-
-    def controller_start(self):
-        self.controller_pending = True
-        self.controller_reads = 0
-
-    def controller_read(self, address):
-        self.controller_reads += 1
-        values = ({18: 2, 16: KickWitness.ROTATION_BITS, 2: 0, 3: 0}
-                  if self.controller_reads <= 5 else {18: 0, 16: 0, 2: 100, 3: 100})
-        return values[address]
-
-    def controller_completed(self):
-        self.controller_pending = False
-
-    def telemetry_ready(self):
-        return True
-
-    def body_power_adc(self):
-        return 3242
-
-    def body_positions(self):
-        # Synthetic neutral feedback; never pretend it follows commanded targets.
-        return (0,) * 30
-
-    def check_queue(self):
-        pass
-
-    def prepare_motion(self):
-        pass
-
-    def probe(self):
-        pass
-
-    def connect_body(self):
-        self.reset()
-
-    def __init__(self, config):
-        self.sent = 0
-        self.resets = 0
-        self.busy_until = 0
-        self.frame_s = config["parameters"]["motion.frame_ms"] / 1000
-
-    def send(self, values, frames, pause):
-        self.sent += 1
-        self.busy_until = time.monotonic() + frames * self.frame_s
-
-    def drained(self):
-        return time.monotonic() >= self.busy_until
-
-    def reset(self):
-        self.resets += 1
-        self.busy_until = 0
-        self.controller_pending = False
-
-    def head(self, values, frames):
-        self.sent += 1
-
-    def body_quaternion(self):
-        return (math.sqrt(0.5), 0, 0, math.sqrt(0.5))
+from roki_ng.body.communication.transports.motherboard import BodyTransmissionError, RokiHardware, SimHardware
 
 
 class Body:
@@ -328,6 +42,8 @@ class Body:
         self.emit, self.log = emit, log
         self.simulated = config.get("simulate", False)
         self.parameters = config["parameters"]
+        self.backend = load(config.get('robot_model'))
+        self._check_model_parameters(self.parameters)
         self.hardware = SimHardware(config) if self.simulated else RokiHardware(config)
         self.body_connected = self.simulated
         self.body_disabled = config.get("body_disabled", False)
@@ -348,7 +64,7 @@ class Body:
         self.fall_sequence = 0
         self.fall_samples = 0
         self.recovery_active = False
-        self.model = Robot()
+        self.model = self.backend.Robot()
         self.hip_limits = {(servo, bus): sorted((7500 + low * sign, 7500 + high * sign))
                            for servo, bus, sign, _, low, high, *_ in self.model.ACTIVESERVOS
                            if servo == 7}
@@ -384,8 +100,8 @@ class Body:
         self.segment_active = False
         self.instruction_started = 0
         self.head = {"pan": 0, "tilt": 0}
-        self.slots = sorted(p.stem for p in (ASSETS / "slots").glob("*.json"))
-        self.jumps = json.loads((ASSETS / "jumps.json").read_text())
+        self.slots = sorted(p.stem for p in (self.backend.ASSETS / "slots").glob("*.json"))
+        self.jumps = json.loads((self.backend.ASSETS / "jumps.json").read_text())
         self.log("INFO", "Motherboard ready; body connection checked separately; camera remains off")
 
     def state(self):
@@ -408,7 +124,7 @@ class Body:
     def _engine(self):
         if self.engine is None:
             from roki_ng.body.motion.engine import Engine
-            self.engine = Engine(self.parameters, log=self.log)
+            self.engine = Engine(self.parameters, log=self.log, backend=self.backend)
         return self.engine
 
     def command(self, op, args):
@@ -537,6 +253,7 @@ class Body:
         if op == "state":
             return self.state()
         if op == "params.apply":
+            self._check_model_parameters(self.parameters | args)
             if self.active:
                 raise Fault("busy", "Stop motion before applying motion parameters", True)
             geometry_changed = any(key in args and args[key] != self.parameters[key]
@@ -559,7 +276,8 @@ class Body:
                 raise Fault("not_found", "Job no longer retained")
             if job['operation'] == 'game.walk':
                 from roki_ng.body.motion.game_geometry import camera_height
-                height = self.parameters['game.camera_height_m']
+                from roki_ng.vision.camera_geometry import height as optical_height
+                height = optical_height(self.parameters, self.model.camera)
                 if self.active == job['job_id'] and self.body_imu.fresh(time.monotonic()):
                     height = camera_height(self.parameters, self.model, self.engine,
                                            self.body_imu.pitch, self.body_imu.roll,
@@ -697,7 +415,7 @@ class Body:
             if name not in self.slots:
                 raise Fault("not_found", "Unknown software slot")
             factor = number(args, "speed_factor", 1.0, 0.25, 2)
-            document = json.loads((ASSETS / "slots" / f"{name}.json").read_text())
+            document = json.loads((self.backend.ASSETS / "slots" / f"{name}.json").read_text())
             if "frames" in document:
                 steps = slots.decode(document, self.model, factor)
                 return self._start(op, self._individual_slot(steps))
@@ -723,11 +441,13 @@ class Body:
             return self._start(op, self._get_up(crouch))
         if op == "motion.splits":
             kind = choice(args, "kind", "small", ("small", "big"))
+            self.backend.splits(kind == 'big')  # Reject unavailable primitives before preparing hardware.
             crouch = choice(args, "crouch", "off", ("off", "on", "centered"))
             return self._start(op, self._splits(kind, crouch))
         if op == "motion.kick":
             leg = choice(args, "leg", "right", ("right", "left"))
             kick_type = self.parameters['motion.kick_type']
+            self._check_model_parameters(self.parameters)
             power = number(args, "power", 80, 20 if kick_type == 'controller' else 1, 100, True)
             offset = number(args, "offset", 0, -60, 80, True)
             return self._start(op, self._kick(leg, power, offset, kick_type),
@@ -739,6 +459,12 @@ class Body:
                                "measurement_baseline": {key: plan.parameters[key]
                                    for key in MEASUREMENTS["spot_run"]} if plan.name == "spot_run" else {}})
         raise Fault("not_supported", op)
+
+    def _check_model_parameters(self, values):
+        if not self.backend.CONTROLLER_KICK and values.get('motion.kick_type') == 'controller':
+            raise Fault('unsupported', 'Controller kick contract is not verified for this robot model')
+        if not self.backend.STABILIZATION and values.get('stabilization.enabled'):
+            raise Fault('unsupported', 'Crouch stabilization is not validated for this robot model')
 
     def _start(self, op, plan, details=None):
         self.hardware.prepare_motion()
@@ -1217,7 +943,7 @@ class Body:
             yield from self._static_crouch(name == "crouch_centered")
             return
         if name == "stand" and self.pose in ("splits_small", "splits_big", "crouch_centered"):
-            _, values = self._crouch_target(True, height=215)
+            _, values = self._crouch_target(True, height=self.backend.STAND_HEIGHT)
             # Match walk_Final_Pose's neutral arms at a reachable leg extension.
             for value in values:
                 if value.Id in (1, 2, 3, 4):
@@ -1232,7 +958,7 @@ class Body:
             # Entering gait from another pose must not reuse its foot geometry.
             self.engine = None
         if name == "base_stand":
-            rows = json.loads((ASSETS / "slots/Initial_Pose.json").read_text())["Initial_Pose"]
+            rows = json.loads((self.backend.ASSETS / "slots/Initial_Pose.json").read_text())["Initial_Pose"]
             yield from self._slot(rows)
             # Re-enable the head at its last commanded target after a hard stop.
             yield from self._head(self.head["pan"], self.head["tilt"])
@@ -1408,11 +1134,12 @@ class Body:
             # Protocol simulation has no IK or physical geometry. These neutral
             # targets exist only to exercise selective-joint command bookkeeping.
             addresses = {(s, b) for s, b, *_ in self.model.ACTIVESERVOS[:21]}
-            addresses.update(((13, 1), (13, 2)))
+            if self.model.mapping.split_knee:
+                addresses.update(((13, 1), (13, 2)))
             return None, [SimpleNamespace(Id=s, Sio=b, Data=7500)
                           for s, b in sorted(addresses)]
         from roki_ng.body.motion.engine import Engine
-        engine = Engine(self.parameters, log=self.log)
+        engine = Engine(self.parameters, log=self.log, backend=self.backend)
         if height is not None:
             engine.gaitHeight = height
         return engine, engine.crouch_target(centered)
@@ -1437,7 +1164,7 @@ class Body:
         yield "drain",
 
     def _splits(self, kind, crouch):
-        steps = slots.decode(slots.splits(kind == "big"), self.model)
+        steps = slots.decode(self.backend.splits(kind == "big"), self.model)
         # Always prepare before the deep entry, including a request from stand.
         target = "crouch_centered" if crouch == "centered" else "crouch"
         if self.pose != target:
@@ -1446,7 +1173,6 @@ class Body:
         self.pose = f"splits_{kind}"
 
     def _get_up(self, crouch):
-        from roki_ng.body.recovery import SLOTS
         from roki_ng.body.recovery import stable_position
         position = yield from stable_position(self)
         if position is None:
@@ -1458,8 +1184,8 @@ class Body:
         if position == "upright":
             yield from self._pose("base_stand" if crouch == "off" else target)
             return
-        name = SLOTS[position]
-        rows = json.loads((ASSETS / "slots" / f"{name}.json").read_text())[name]
+        name = self.backend.RECOVERY[position]
+        rows = json.loads((self.backend.ASSETS / "slots" / f"{name}.json").read_text())[name]
         self.recovery_active = True
         try:
             if crouch == "off":
@@ -1492,6 +1218,8 @@ class Body:
 
     def _kick(self, leg, power, offset, kick_type=None):
         kick_type = kick_type or self.parameters['motion.kick_type']
+        if kick_type == 'controller' and not self.backend.CONTROLLER_KICK:
+            raise Fault('unsupported', 'Controller kick slot contract is not verified for this robot model')
         if self.active:
             self.jobs[self.active].update(kick_type=kick_type, execution_uncertain=False)
             self.emit('job.progress', dict(self.jobs[self.active]))
@@ -1558,15 +1286,7 @@ class Body:
         self.pose = "unknown"
         self.engine = None
         for row in rows:
-            values = []
-            for index, angle in enumerate(row[1:]):
-                servo, bus, sign, *_ = self.model.ACTIVESERVOS[index]
-                if legs_only and not 5 <= servo <= 10:
-                    continue
-                data = int(angle * sign / (2 if servo == 8 else 1) + 7500)
-                if servo == 8:
-                    values.append(SimpleNamespace(Id=13, Sio=bus, Data=data))
-                values.append(SimpleNamespace(Id=servo, Sio=bus, Data=data))
+            values = self.model.mapping.targets(self.model, row[1:], legs_only=legs_only)
             frames = round(row[0] / factor)
             yield "servo", values, frames, frames - 1
         yield "drain",
@@ -1614,22 +1334,7 @@ class Body:
         self.engine = engine
 
     def _jump_rows(self, direction, fraction):
-        if direction.startswith("turn_"):
-            rows = [[10] + [0] * 21, [2] + [0] * 21, [2] + [0] * 21]
-            rows[1][1], rows[1][12] = -700, 700
-            rows[1][6] = rows[1][17] = round((1000 if direction == "turn_right" else -1000) * fraction)
-            return rows
-        rows = copy.deepcopy(self.jumps[direction])
-        if direction in ("forward", "backward"):
-            for row in rows[:2]:
-                for index in (2, 13):
-                    row[index] = round(row[index] * fraction)
-        else:
-            value = round((200 if direction == "right" else -200) * fraction)
-            for index in (1, 5, 12, 16):
-                rows[0][index] = value
-            rows[1][5] = rows[1][16] = value
-        return rows
+        return self.backend.jump_rows(direction, fraction)
 
     def close(self):
         try:

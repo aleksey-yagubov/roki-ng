@@ -501,7 +501,7 @@ def test_game_allows_live_vision_isp_logging_and_diagnostic_settings(tmp_path):
         assert s.params.values['localisation.max_speed_m_s'] == .4
         await s.dispatch(owner,'camera.controls.set',{'values':{'camera.analogue_gain':3.},'lease_epoch':3})
         assert s.params.values['camera.analogue_gain'] == 2.  # Volatile ISP edit.
-        for key, value in (('walk.gait_height_mm',190), ('game.camera_height_m',.5), ('stabilization.enabled',True)):
+        for key, value in (('walk.gait_height_mm',190), ('camera.custom_height_m',.5), ('stabilization.enabled',True)):
             with pytest.raises(Fault, match='Stop goalkeeper'):
                 await s.dispatch(owner,'params.set',{'key':key,'value':value,'lease_epoch':3})
         assert s.game.info['running'] and s.mode=='GAME'

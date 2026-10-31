@@ -91,8 +91,10 @@ def ball_candidates(image, parameters, projector, quaternion, camera_height=None
         except ValueError:
             decision(rect, 'projection')
             continue
-        height = parameters['game.camera_height_m'] if camera_height is None else camera_height
-        scale = (height-parameters['game.ball_diameter_m']/2)/parameters['game.camera_height_m']
+        height = projector.height if camera_height is None else camera_height
+        if parameters.get('camera.custom_height_m', 0.) != 0:
+            height = parameters['camera.custom_height_m']
+        scale = (height-parameters['game.ball_diameter_m']/2)/projector.height
         px, py = px*scale, py*scale
         if not math.isfinite(px) or not math.isfinite(py) or px <= 0 or math.hypot(px, py) > parameters.get('game.ball_max_distance_m', 3.):
             decision(rect, 'range')
@@ -139,6 +141,8 @@ class BallTracker:
 
 class BallObservation:
     def __init__(self, config):
+        from roki_ng.body.motion.backends import load
+        self.camera_model = load(config.get('robot_model')).Robot.camera
         self.directory = Path(config.get('state_dir', '.'))/'localisation'
         self.parameters = config['parameters']
         self.parameter_revision = 0
@@ -159,7 +163,7 @@ class BallObservation:
         self.video = None
 
     def geometry(self, args):
-        height = number(args, 'height_m', None, .1, .8)
+        height = number(args, 'height_m', None, .05, 3.)
         stamp = number(args, 'stamp', None, 0, 1e12)
         with self.lock:
             if not self.geometry_history or stamp > self.geometry_history[-1][0]:
@@ -246,7 +250,8 @@ class BallObservation:
             profile = json.loads((self.directory/'profile.json').read_text())
             if profile.get('schema') != 1 or profile.get('capture_size') != [800, 650]:
                 raise ValueError('Incompatible calibration profile')
-            projector = GroundProjection(self.directory, self.parameters.get('game.camera_height_m', .4068))
+            from roki_ng.vision.camera_geometry import height
+            projector = GroundProjection(self.directory, height(self.parameters, self.camera_model))
             if self.stop_event.is_set():
                 return
             # Construct and release every iceoryx object on its owning thread.
@@ -319,7 +324,7 @@ class BallObservation:
                     from roki_ng.detection.football import camera_geometry
                     from roki_ng.detection.football import plane_point
                     from roki_ng.detection.football import goal_parts
-                    geometry = camera_geometry(parameters, pose['pan'], pose['tilt'])
+                    geometry = camera_geometry(parameters, pose['pan'], pose['tilt'], self.camera_model)
                     # Use exactly the same blob centre as the normal detector.
                     # A separate projection avoids transferring its old floor-height scale.
                     selected = candidates[0] if candidates else None

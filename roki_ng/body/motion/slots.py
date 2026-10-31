@@ -7,10 +7,7 @@ from roki_ng.wire import Fault
 
 
 def joints(model):
-    result = {row[6].removeprefix("MASK_").lower(): (row[0], row[1])
-              for row in model.ACTIVESERVOS}
-    result.update(right_knee_bot=(13, 1), left_knee_bot=(13, 2))
-    return result
+    return model.mapping.joints(model)
 
 
 MIRRORED = frozenset((
@@ -59,21 +56,3 @@ def decode(document, model, factor=1):
                   for name, value in targets.items()]
         steps.append(("servo", values, frames, frames - 1))
     return steps
-
-
-def splits(big):
-    """ROKI2 splits entry, retaining individual lower knees; no automatic exit."""
-    def frame(duration, **targets):
-        return {"duration": duration, "targets": {
-            f"{side}_{joint}": value for joint, value in targets.items()
-            for side in ("right", "left")}}
-    rows = [frame(80, pelvic=0, hip_side=0, hip=3000, knee=3600,
-                  knee_bot=3600, foot_front=4100, foot_side=0),
-            frame(9, foot_side=3000),
-            frame(10, pelvic=0, hip_side=1400, hip=3000, knee=3600,
-                  knee_bot=3600, foot_front=4100, foot_side=1400)]
-    if big:
-        rows.extend([frame(9, foot_side=3000),
-                     frame(40, hip_side=4200, foot_side=1500, clavicle=2800, shoulder=0),
-                     frame(40, hip=0, knee=0, knee_bot=0, foot_front=0)])
-    return {"units": "zubr", "joint_space": "individual", "frames": rows}

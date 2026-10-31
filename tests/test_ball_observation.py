@@ -19,6 +19,7 @@ def parameters():
 
 
 class Projector:
+    height = .4068
     def __init__(self, point=(1., .1)):
         self.point = point
         self.pixels = []
@@ -40,7 +41,7 @@ def scene(centres=((400, 400),), turf=True):
 def test_field_support_and_original_ball_centre_radius_projection():
     projector = Projector()
     candidates = ball_candidates(scene(), parameters(), projector, [0, 0, 0, 1])
-    scale = 1-parameters()['game.ball_diameter_m']/2/parameters()['game.camera_height_m']
+    scale = 1-parameters()['game.ball_diameter_m']/2/Projector.height
     assert candidates[0]['x_m'] == pytest.approx(scale)
     assert candidates[0]['y_m'] == pytest.approx(.1*scale)
     assert candidates[0]['rect'] == [380, 380, 421, 421]
@@ -117,6 +118,7 @@ def test_temporal_freshness_and_rejection():
 
 def test_lowest_ball_centre_is_selected_as_in_original():
     class DistanceProjector:
+        height = .4068
         def ground_point(self, pixel, quaternion):
             return (800-pixel[0])/200, .1
 

@@ -17,8 +17,9 @@ def head_angles(quaternion):
 
 class GroundProjection:
     def __init__(self, directory, height):
-        if not math.isfinite(height) or not .2<=height<=.8:
+        if not math.isfinite(height) or not .05<=height<=3.:
             raise ValueError('Invalid camera height')
+        self.height = height
         directory = Path(directory)
         self.P = np.load(directory/'Camera_calibration_P.npy', allow_pickle=False)
         m1 = np.load(directory/'Camera_calibration_map1.npy', allow_pickle=False)

@@ -109,6 +109,7 @@ class HardwareOnly(ast.NodeTransformer):
 
 
 def main():
+    raise SystemExit('Historical importer: disabled after backend split. Review upstream changes against body/motion; do not overwrite the shared gait or model.')
     path = SOURCE / "Soccer/Motion/class_Motion.py"
     source = path.read_text()
     tree = ast.parse(source)

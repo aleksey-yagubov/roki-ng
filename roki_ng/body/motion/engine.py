@@ -1,15 +1,16 @@
 """Cooperative gait generator; no camera, filesystem calibration or global app."""
 
 from roki_ng.body.motion.gait import GaitAlgorithms
-from roki_ng.body.motion.model import Robot
+from roki_ng.body.motion.backends import load
 import logging
 from roki_ng.body.motion.gait import Servo
 from roki_ng.wire import Fault
 
 
-class Engine(Robot, GaitAlgorithms):
-    def __init__(self, parameters, log=None):
-        Robot.__init__(self)
+class Engine(GaitAlgorithms):
+    def __init__(self, parameters, log=None, *, backend=None):
+        self.backend = backend or load()
+        self.__dict__.update(self.backend.Robot().__dict__)
         self.log = log or (lambda level, message: logging.getLogger(__name__).log(
             getattr(logging, level), message))
         self.configure(parameters)
@@ -59,13 +60,11 @@ class Engine(Robot, GaitAlgorithms):
         angles = self.computeAlphaForWalk()
         if not angles:
             raise Fault("invalid_motion", "Cannot solve requested crouch pose")
-        values = []
-        for angle, (servo, bus, sign, *_) in zip(angles, self.ACTIVESERVOS):
-            data = int(7500 + angle * 1698 * sign / (2 if servo == 8 else 1))
-            values.append(Servo(servo, bus, data))
-            if servo == 8:
-                values.append(Servo(13, bus, data))
-        return values
+        return self.mapping.targets(self, angles, scale=1698, extra_first=False)
+
+    def joint_targets(self, angles):
+        return self.mapping.targets(self, angles, scale=1698,
+                                    keep_hands_up=self.keep_hands_up)
 
     def solve_leg(self, leg, *args):
         import starkit

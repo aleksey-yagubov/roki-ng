@@ -6,7 +6,7 @@ from roki_ng.body.runtime import Body
 from roki_ng.body.calibration import describe
 from roki_ng.parameters import Parameters
 from roki_ng.body.recovery import body_position
-from roki_ng.body.recovery import SLOTS
+from roki_ng.body.motion.backends.roki2.backend import RECOVERY as SLOTS
 from roki_ng.wire import Fault
 
 pytestmark = pytest.mark.usefixtures("body_clock")

@@ -117,32 +117,7 @@ class GaitAlgorithms:
                 self.exitFlag = self.exitFlag + 1
             else:
                 joint_number = len(angles)
-                if self.model == 'Roki_2':
-                    servoDatas = []
-                    for i in range(joint_number):
-                        if self.keep_hands_up:
-                            if i in self.hand_joints:
-                                continue
-                        if self.ACTIVESERVOS[i][0] == 8:
-                            pos = int(angles[i] * 1698 * self.ACTIVESERVOS[i][2] / 2 + 7500)
-                            servoData = Servo()
-                            servoData.Id, servoData.Sio, servoData.Data = (13, self.ACTIVESERVOS[i][1], pos)
-                            servoDatas.append(servoData)
-                        else:
-                            pos = int(angles[i] * 1698 * self.ACTIVESERVOS[i][2] + 7500)
-                        servoData = Servo()
-                        servoData.Id, servoData.Sio, servoData.Data = (self.ACTIVESERVOS[i][0], self.ACTIVESERVOS[i][1], pos)
-                        servoDatas.append(servoData)
-                else:
-                    servoDatas = []
-                    for i in range(joint_number):
-                        if self.keep_hands_up:
-                            if i in self.hand_joints:
-                                continue
-                        pos = int(angles[i] * 1698 * self.ACTIVESERVOS[i][2] + 7500)
-                        servoData = Servo()
-                        servoData.Id, servoData.Sio, servoData.Data = (self.ACTIVESERVOS[i][0], self.ACTIVESERVOS[i][1], pos)
-                        servoDatas.append(servoData)
+                servoDatas = self.joint_targets(angles)
                 if j == 0:
                     a = (yield ('servo', servoDatas, 10, 9))
                 else:
@@ -177,8 +152,10 @@ class GaitAlgorithms:
             alpha01 = math.pi / self.fr1 * 2
         frameNumberPerCycle = 2 * self.fr1 + 2 * self.fr2
         framestep = self.simThreadCycleInMs // 10
-        xtl0 = self.stepLength * (1 - (self.fr1 + self.fr2 + 2 * framestep) / (2 * self.fr1 + self.fr2 + 2 * framestep)) * 1.5
+        xtl0 = self.stepLength * (1 - (self.fr1 + self.fr2 + 2 * framestep) / (2 * self.fr1 + self.fr2 + 2 * framestep)) * self.backend.LEAD_STRIDE_SCALE
         xtr0 = self.stepLength * (1 / 2 - (self.fr1 + self.fr2 + 2 * framestep) / (2 * self.fr1 + self.fr2 + 2 * framestep))
+        if self.backend.ZERO_FIRST_RIGHT:
+            xtr0 = 0
         dx0_typical = self.stepLength / (2 * self.fr1 + self.fr2 + 2 * framestep) * framestep
         dy0_typical = self.sideLength / (2 * self.fr1 + self.fr2 + 2 * framestep) * framestep
         xr_old, xl_old, yr_old, yl_old = (self.xr, self.xl, self.yr, self.yl)
@@ -199,7 +176,8 @@ class GaitAlgorithms:
                 break
             start1 = time.perf_counter()
             if 0 <= iii < self.fr1:
-                S = order[iii + framestep - 1] * (self.amplitude + self.sideLength) / self.amplitude
+                S = (self.amplitude / 2 * math.cos(alpha01 * iii / 2) if self.backend.COSINE_SWAY else
+                     order[iii + framestep - 1] * (self.amplitude + self.sideLength) / self.amplitude)
                 self.ytr = S - self.d10 + self.sideLength / 2
                 self.ytl = S + self.d10 + self.sideLength / 2
                 self.ztl = -self.gaitHeight
@@ -211,7 +189,8 @@ class GaitAlgorithms:
                 self.xtl = xtl0 - dx0 - dx0 * iii / framestep
                 self.xtr = xtr0 - dx0 - dx0 * iii / framestep
             if self.fr1 + self.fr2 <= iii < 2 * self.fr1 + self.fr2:
-                S = -order[iii - self.fr1 - self.fr2 + framestep - 1] * (self.amplitude + self.sideLength) / self.amplitude
+                S = (self.amplitude / 2 * math.cos(alpha01 * (iii - self.fr2) / 2) if self.backend.COSINE_SWAY else
+                     -order[iii - self.fr1 - self.fr2 + framestep - 1] * (self.amplitude + self.sideLength) / self.amplitude)
                 self.ytr = S - self.d10 - self.sideLength / 2
                 self.ytl = S + self.d10 + self.sideLength / 2
                 self.ztl = -self.gaitHeight
@@ -234,7 +213,8 @@ class GaitAlgorithms:
                 if iii == self.fr1:
                     self.xtr -= dx0
                     self.ytr = S - self.d10 + dy0
-                    self.ztr = -self.gaitHeight + self.stepHeight / 2
+                    if self.backend.HALF_LIFT:
+                        self.ztr = -self.gaitHeight + self.stepHeight / 2
                 elif iii == self.fr1 + self.fr2 - framestep:
                     self.xtr -= dx0
                     self.ytr = S - self.d10 + 2 * dy0 - self.sideLength
@@ -260,7 +240,8 @@ class GaitAlgorithms:
                 if iii == 2 * self.fr1 + self.fr2:
                     self.xtl -= dx0
                     self.ytl = S + self.d10 + dy0
-                    self.ztl = -self.gaitHeight + self.stepHeight / 2
+                    if self.backend.HALF_LIFT:
+                        self.ztl = -self.gaitHeight + self.stepHeight / 2
                 elif iii == 2 * self.fr1 + 2 * self.fr2 - framestep:
                     self.xtl -= dx0
                     self.ytl = S + self.d10 + 2 * dy0 - self.sideLength
@@ -278,31 +259,7 @@ class GaitAlgorithms:
             else:
                 joint_number = len(angles)
                 servoDatas = []
-                if self.model == 'Roki_2':
-                    for i in range(joint_number):
-                        if self.keep_hands_up:
-                            if i in self.hand_joints:
-                                continue
-                        if self.ACTIVESERVOS[i][0] == 8:
-                            pos = int(angles[i] * 1698 * self.ACTIVESERVOS[i][2] / 2 + 7500)
-                            servoData = Servo()
-                            servoData.Id, servoData.Sio, servoData.Data = (13, self.ACTIVESERVOS[i][1], pos)
-                            servoDatas.append(servoData)
-                        else:
-                            pos = int(angles[i] * 1698 * self.ACTIVESERVOS[i][2] + 7500)
-                        servoData = Servo()
-                        servoData.Id, servoData.Sio, servoData.Data = (self.ACTIVESERVOS[i][0], self.ACTIVESERVOS[i][1], pos)
-                        servoDatas.append(servoData)
-                else:
-                    servoDatas = [Servo() for _ in range(joint_number)]
-                    for i in range(joint_number):
-                        if self.keep_hands_up:
-                            if i in self.hand_joints:
-                                continue
-                        pos = int(angles[i] * 1698 * self.ACTIVESERVOS[i][2] + 7500)
-                        servoData = Servo()
-                        servoData.Id, servoData.Sio, servoData.Data = (self.ACTIVESERVOS[i][0], self.ACTIVESERVOS[i][1], pos)
-                        servoDatas.append(servoData)
+                servoDatas = self.joint_targets(angles)
                 a = (yield ('servo', servoDatas, self.frames_per_cycle, 0))
                 time1 = time.perf_counter() - start1
         self.xr, self.xl, self.yr, self.yl = (xr_old, xl_old, yr_old, yl_old)
@@ -323,9 +280,9 @@ class GaitAlgorithms:
             self.xr, self.xl = (self.params['BODY_TILT_AT_WALK'], self.params['BODY_TILT_AT_WALK'])
         for j in range(self.initPoses):
             start1 = time.perf_counter()
-            # Leave extension margin below the 221.8 mm model length.
-            self.ztr = -self.gaitHeight - (j + 1) * (215.0 - self.gaitHeight) / self.initPoses
-            self.ztl = -self.gaitHeight - (j + 1) * (215.0 - self.gaitHeight) / self.initPoses
+            # Backend stance leaves extension margin for its mechanical model.
+            self.ztr = -self.gaitHeight - (j + 1) * (self.backend.STAND_HEIGHT - self.gaitHeight) / self.initPoses
+            self.ztl = -self.gaitHeight - (j + 1) * (self.backend.STAND_HEIGHT - self.gaitHeight) / self.initPoses
             self.ytr = -self.d10 - (self.initPoses - (j + 1)) * self.amplitude / 2 / self.initPoses
             self.ytl = self.d10 - (self.initPoses - (j + 1)) * self.amplitude / 2 / self.initPoses
             if j == self.initPoses - 1:
@@ -337,30 +294,7 @@ class GaitAlgorithms:
             else:
                 joint_number = len(angles)
                 servoDatas = []
-                if self.model == 'Roki_2':
-                    for i in range(joint_number):
-                        if self.keep_hands_up:
-                            if i in self.hand_joints:
-                                continue
-                        if self.ACTIVESERVOS[i][0] == 8:
-                            pos = int(angles[i] * 1698 * self.ACTIVESERVOS[i][2] / 2 + 7500)
-                            servoData = Servo()
-                            servoData.Id, servoData.Sio, servoData.Data = (13, self.ACTIVESERVOS[i][1], pos)
-                            servoDatas.append(servoData)
-                        else:
-                            pos = int(angles[i] * 1698 * self.ACTIVESERVOS[i][2] + 7500)
-                        servoData = Servo()
-                        servoData.Id, servoData.Sio, servoData.Data = (self.ACTIVESERVOS[i][0], self.ACTIVESERVOS[i][1], pos)
-                        servoDatas.append(servoData)
-                else:
-                    for i in range(joint_number):
-                        if self.keep_hands_up:
-                            if i in self.hand_joints:
-                                continue
-                        pos = int(angles[i] * 1698 * self.ACTIVESERVOS[i][2] + 7500)
-                        servoData = Servo()
-                        servoData.Id, servoData.Sio, servoData.Data = (self.ACTIVESERVOS[i][0], self.ACTIVESERVOS[i][1], pos)
-                        servoDatas.append(servoData)
+                servoDatas = self.joint_targets(angles)
                 a = (yield ('servo', servoDatas, self.frames_per_cycle, 0))
                 time1 = time.perf_counter() - start1
         if respect_body_tilt:
@@ -381,8 +315,8 @@ class GaitAlgorithms:
         yield ('drain',)
         for j in range(pose_taking_cycles):
             start1 = time.perf_counter()
-            self.ztr = -self.gaitHeight - (j + 1) * (215.0 - self.gaitHeight) / pose_taking_cycles
-            self.ztl = -self.gaitHeight - (j + 1) * (215.0 - self.gaitHeight) / pose_taking_cycles
+            self.ztr = -self.gaitHeight - (j + 1) * (self.backend.STAND_HEIGHT - self.gaitHeight) / pose_taking_cycles
+            self.ztl = -self.gaitHeight - (j + 1) * (self.backend.STAND_HEIGHT - self.gaitHeight) / pose_taking_cycles
             self.ytr = -self.d10 - (pose_taking_cycles - (j + 1)) * self.amplitude / 2 / pose_taking_cycles
             self.ytl = self.d10 - (pose_taking_cycles - (j + 1)) * self.amplitude / 2 / pose_taking_cycles
             if j == pose_taking_cycles - 1:
@@ -393,26 +327,14 @@ class GaitAlgorithms:
                 self.exitFlag = self.exitFlag + 1
             else:
                 joint_number = len(angles)
-                if self.model == 'Roki_2':
-                    servoDatas = [Servo() for _ in range(joint_number + 2)]
-                    for i in range(joint_number):
-                        if self.ACTIVESERVOS[i][0] == 8:
-                            n = joint_number - 1 + self.ACTIVESERVOS[i][1]
-                            pos = int(angles[i] * 1698 * self.ACTIVESERVOS[i][2] / 2 + 7500)
-                            servoDatas[n].Id, servoDatas[n].Sio, servoDatas[n].Data = (13, self.ACTIVESERVOS[i][1], pos)
-                        else:
-                            pos = int(angles[i] * 1698 * self.ACTIVESERVOS[i][2] + 7500)
-                        servoDatas[i].Id, servoDatas[i].Sio, servoDatas[i].Data = (self.ACTIVESERVOS[i][0], self.ACTIVESERVOS[i][1], pos)
-                else:
-                    servoDatas = [Servo() for _ in range(joint_number)]
-                    for i in range(joint_number):
-                        pos = int(angles[i] * 1698 * self.ACTIVESERVOS[i][2] + 7500)
-                        servoDatas[i].Id, servoDatas[i].Sio, servoDatas[i].Data = (self.ACTIVESERVOS[i][0], self.ACTIVESERVOS[i][1], pos)
+                servoDatas = self.joint_targets(angles)
                 a = (yield ('servo', servoDatas, self.frames_per_cycle, 0))
                 time1 = time.perf_counter() - start1
         self.xr, self.xl, self.yr, self.yl = (xr_old, xl_old, yr_old, yl_old)
 
     def kick(self, first_Leg_Is_Right_Leg, small=False, kick_offset=0):
+        if not self.backend.KICK_OFFSET:
+            kick_offset = 0
         self.robot_In_0_Pose = False
         if not self.falling_Test() == 0:
             if self.falling_Flag == 3:
@@ -497,25 +419,10 @@ class GaitAlgorithms:
             if not self.falling_Flag == 0:
                 return
             if len(angles) == 0:
-                print('unresolved IK at kick')
                 self.exitFlag = self.exitFlag + 1
             else:
                 joint_number = len(angles)
-                if self.model == 'Roki_2':
-                    servoDatas = [Servo() for _ in range(joint_number + 2)]
-                    for i in range(joint_number):
-                        if self.ACTIVESERVOS[i][0] == 8:
-                            n = joint_number - 1 + self.ACTIVESERVOS[i][1]
-                            pos = int(angles[i] * 1698 * self.ACTIVESERVOS[i][2] / 2 + 7500)
-                            servoDatas[n].Id, servoDatas[n].Sio, servoDatas[n].Data = (13, self.ACTIVESERVOS[i][1], pos)
-                        else:
-                            pos = int(angles[i] * 1698 * self.ACTIVESERVOS[i][2] + 7500)
-                        servoDatas[i].Id, servoDatas[i].Sio, servoDatas[i].Data = (self.ACTIVESERVOS[i][0], self.ACTIVESERVOS[i][1], pos)
-                else:
-                    servoDatas = [Servo() for _ in range(joint_number)]
-                    for i in range(joint_number):
-                        pos = int(angles[i] * 1698 * self.ACTIVESERVOS[i][2] + 7500)
-                        servoDatas[i].Id, servoDatas[i].Sio, servoDatas[i].Data = (self.ACTIVESERVOS[i][0], self.ACTIVESERVOS[i][1], pos)
+                servoDatas = self.joint_targets(angles)
                 a = (yield ('servo', servoDatas, self.frames_per_cycle, 0))
         self.xr, self.xl, self.yr, self.yl = (xr_old, xl_old, yr_old, yl_old)
         yield from self.walk_Final_Pose_After_Kick()

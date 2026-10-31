@@ -8,13 +8,20 @@ from roki_ng.body.calibration import wrap
 TICK = .00058909
 
 
-def camera_geometry(p, pan, tilt):
-    neck = p['game.neck_height_m']
-    ref = p['game.camera_reference_tilt']*TICK
+def camera_geometry(p, pan, tilt, model=None):
+    if model is None:
+        from roki_ng.body.motion.backends import load
+        model = load().Robot.camera
+    from roki_ng.vision.camera_geometry import height
+    neck = model.neck_m
+    ref = model.reference_tilt*TICK
     angle, pitch = -pan*TICK, tilt*TICK
     radius = neck*math.sin(-pitch)
-    return dict(height=p['game.camera_height_m']+neck*(math.cos(pitch)-math.cos(ref)),
-                x=p['game.camera_forward_m']-neck*math.sin(-ref)+radius*math.cos(angle),
+    optical_height = height(p, model)
+    if p.get('camera.custom_height_m', 0.) == 0:
+        optical_height += neck*(math.cos(pitch)-math.cos(ref))
+    return dict(height=optical_height,
+                x=model.forward_m-neck*math.sin(-ref)+radius*math.cos(angle),
                 y=radius*math.sin(angle), pan=angle)
 
 

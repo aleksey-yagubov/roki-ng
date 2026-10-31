@@ -20,7 +20,9 @@ roki-client = "roki_ng.client:main"
 include = ["roki_ng*"]
 
 [tool.setuptools.package-data]
-roki_ng = ["assets/*.json", "assets/slots/*.json"]
+roki_ng = ["assets/*.json"]
+"roki_ng.body.motion.backends.roki1" = ["*.json", "slots/*.json"]
+"roki_ng.body.motion.backends.roki2" = ["*.json", "slots/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -5,10 +5,10 @@ import pytest
 
 from roki_ng.body.runtime import Body
 from roki_ng.body.motion.engine import Engine
-from roki_ng.body.motion.model import Robot
+from roki_ng.body.motion.backends.roki2.model import Robot
 from roki_ng.body.motion.slots import decode
 from roki_ng.body.motion.slots import position
-from roki_ng.body.motion.slots import splits
+from roki_ng.body.motion.backends.roki2.primitives import splits
 from roki_ng.parameters import Parameters
 from roki_ng.wire import Fault
 

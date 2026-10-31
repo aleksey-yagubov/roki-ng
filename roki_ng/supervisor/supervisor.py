@@ -83,7 +83,8 @@ class Session:
 class Supervisor:
     def __init__(self, config):
         self.config = config
-        self.params = Parameters(config["state_dir"])
+        self.params = Parameters(config["state_dir"], config.get('robot_model'))
+        self.config = config | {'robot_model': self.params.robot_model}
         self.boot_id = uuid.uuid4().hex
         self.sessions = {}
         self.owner = None
@@ -1091,6 +1092,8 @@ class Supervisor:
                                    ("localisation", "next_frame"),
                                    ("camera", "next_request")):
                     update = {k: v for k, v in values.items() if SCHEMA[k][4] == mode}
+                    if role in ('detection', 'localisation') and 'camera.custom_height_m' in values:
+                        update['camera.custom_height_m'] = values['camera.custom_height_m']
                     if role=='localisation' and role not in self.workers:continue
                     if update:
                         previous = {k: self.params.values[k] for k in update}
