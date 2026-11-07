@@ -64,6 +64,7 @@ SCHEMA = {
     "stabilization.slew_deg_s": ("float", 1.0, 0.1, 5, "next_job", "Предел скорости изменения поправки, градусы в секунду. Больше: быстрее и резче коррекция. При старых данных поправка замораживается."),
     "logging.stdout_enabled": ("bool", False, None, None, "live", "Mirror runtime logs to supervisor stdout"),
     "walk.max_step_mm": ("float", 24.0, 1, 64, "next_job", "Продольный масштаб ручного шага, мм при speed=1 и полном вводе. Больше: длиннее шаг; меньше: короче. Темп не меняется; тесты задают свою длину."),
+    "walk.roki1_pult_enabled": ("bool", False, None, None, "next_job", "Эксперимент Roki1: walk_pult во всех режимах ходьбы (ручной, игра, шаговые тесты), фиксированные 165/20 мм. Ручные Q/E используют импульс поворота пульта. Поступательные прыжки, игровые прыжковые повороты, удары и вставание не меняет. В ручном режиме фиксированные шаги 25/-20/18/24 мм, speed и heading_hold игнорируются; crouch сохраняет присед после остановки. Требует motion.frame_ms=20. Проверять со страховкой и заново калибровать отдачу шагов."),
     "walk.max_side_mm": ("float", 12.0, 1, 20, "next_job", "Боковой масштаб ручного шага, мм при speed=1 и полном вводе. Больше: шире боковой шаг; меньше: уже. Темп не меняется."),
     "walk.step_height_mm": ("float", 40.0, 0, 60, "next_job", "Подъём переносимой стопы, мм. Больше: нога поднимается выше; меньше: ниже. Ходьба и шаговые тесты, не прыжки и не удар."),
     "walk.max_yaw_rad": ("float", 0.15, 0, 0.3, "next_job", "Масштаб поворота ручной ходьбой, рад на цикл при полном вводе. Больше: сильнее поворот; меньше: слабее. Не калибровка фактического курса."),
@@ -166,6 +167,8 @@ class Parameters:
             return height
         if key == 'stabilization.enabled' and value is True and not self.backend.STABILIZATION:
             raise Fault('unsupported', 'Crouch stabilization is not validated for this robot model')
+        if key == 'walk.roki1_pult_enabled' and value is True and self.backend.NAME != 'roki1':
+            raise Fault('unsupported', 'Experimental walk_pult requires Roki1')
         if 'choices' in meta:
             return choice({key: value}, key, None, meta['choices'])
         if key in field_config.FIELDS:return field_config.validate(key,value)

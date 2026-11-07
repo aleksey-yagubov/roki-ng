@@ -127,8 +127,8 @@ class TestPlan:
 
     def get_engine(self):
         if self.engine is None:
-            from roki_ng.body.motion.engine import Engine
-            self.engine = Engine(self.parameters, log=self.body.log, backend=self.body.backend)
+            from roki_ng.body.motion.engine import walking_engine
+            self.engine = walking_engine(self.parameters, log=self.body.log, backend=self.body.backend)
             self.body.log('INFO', f'Calibration motion backend: {self.body.backend.NAME}')
         return self.engine
 

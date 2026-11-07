@@ -6,6 +6,13 @@ from roki_ng.body.motion.gait import Servo
 from roki_ng.wire import Fault
 
 
+def walking_engine(parameters, log=None, *, backend):
+    if parameters.get('walk.roki1_pult_enabled', False):
+        from roki_ng.body.motion.backends.roki1.walk_pult import PultWalk
+        return PultWalk(parameters, log, backend=backend)
+    return Engine(parameters, log, backend=backend)
+
+
 class Engine(GaitAlgorithms):
     def __init__(self, parameters, log=None, *, backend):
         if backend is None:

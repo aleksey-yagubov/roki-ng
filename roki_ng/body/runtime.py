@@ -123,8 +123,8 @@ class Body:
 
     def _engine(self):
         if self.engine is None:
-            from roki_ng.body.motion.engine import Engine
-            self.engine = Engine(self.parameters, log=self.log, backend=self.backend)
+            from roki_ng.body.motion.engine import walking_engine
+            self.engine = walking_engine(self.parameters, log=self.log, backend=self.backend)
         return self.engine
 
     def command(self, op, args):
@@ -257,7 +257,7 @@ class Body:
             if self.active:
                 raise Fault("busy", "Stop motion before applying motion parameters", True)
             geometry_changed = any(key in args and args[key] != self.parameters[key]
-                                   for key in ("walk.gait_height_mm", "walk.sway_amplitude_mm"))
+                                   for key in ("walk.gait_height_mm", "walk.sway_amplitude_mm", "walk.roki1_pult_enabled"))
             self.parameters.update(args)
             if self.engine:
                 self.engine.configure(self.parameters)
@@ -428,6 +428,8 @@ class Body:
             direction = choice(args, "direction", "forward", tuple(self.jumps) + ("turn_left", "turn_right"))
             fraction = number(args, "fraction", 1.0, 0.1, 1)
             crouch = choice(args, "crouch", "off", ("off", "on", "centered"))
+            if direction.startswith('turn_') and self.parameters.get('walk.roki1_pult_enabled', False):
+                return self._start(op, self._pult_turn(direction, fraction, crouch))
             if crouch != "off":
                 target = "crouch_centered" if crouch == "centered" else "crouch"
                 if self.pose == target or self.pose == "base_stand":
@@ -461,6 +463,11 @@ class Body:
         raise Fault("not_supported", op)
 
     def _check_model_parameters(self, values):
+        if values.get('walk.roki1_pult_enabled'):
+            if self.backend.NAME != 'roki1':
+                raise Fault('unsupported', 'Experimental walk_pult requires Roki1')
+            if values['motion.frame_ms'] != 20:
+                raise Fault('invalid_argument', 'Experimental walk_pult requires motion.frame_ms=20')
         if not self.backend.CONTROLLER_KICK and values.get('motion.kick_type') == 'controller':
             raise Fault('unsupported', 'Controller kick contract is not verified for this robot model')
         if not self.backend.STABILIZATION and values.get('stabilization.enabled'):
@@ -928,6 +935,10 @@ class Body:
         self.head = {"pan": pan, "tilt": tilt}
 
     def _pose(self, name, *, right_first=True):
+        if (name == 'crouch' and self.parameters.get('walk.roki1_pult_enabled', False)
+                and not getattr(self.engine, 'pult_walk', False)):
+            self.engine = None
+            self.pose = 'unknown'
         if name == "head_field":
             yield from self._head(0, self.parameters["head.field_tilt"])
             return
@@ -1079,6 +1090,9 @@ class Body:
         if position != 'upright':
             raise Fault('fallen', f'Manual walking requires upright body, got {position}')
         self.jobs[self.active]['posture_verified'] = True
+        if fixed is None and self.parameters.get('walk.roki1_pult_enabled', False) and not self.simulated:
+            yield from self._walk_pult()
+            return
         if self.pose != "crouch":
             yield from self._pose("crouch")
         cycle = 0
@@ -1128,6 +1142,70 @@ class Body:
             yield from self._static_crouch(True)
         elif crouch == "off":
             yield from self._pose("stand")
+
+    def _walk_pult(self):
+        from roki_ng.body.motion.backends.roki1.walk_pult import PultWalk, drive_order
+        engine = PultWalk(self.parameters, self.log, backend=self.backend)
+        self._release_stabilization()
+        self.engine = None
+        self.pose = 'unknown'
+        self.log('INFO', 'Experimental Roki1 walk_pult: manual fixed-step walk')
+        completed = False
+        crouch = (self.drive or {}).get('crouch', 'off')
+        try:
+            _, _, right, _ = drive_order(self.drive)
+            engine.first_Leg_Is_Right_Leg = True if right is None else right
+            yield from engine.initial()
+            if not (yield from self.wait_for_imu()):
+                return
+            heading = quaternion_yaw(self.read_body_quaternion()) - .02
+            cycle = 0
+            stop_reason = 'operator_stop'
+            while not self.stop_requested:
+                drive = self.drive
+                if not drive:
+                    stop_reason = 'controls_released'
+                    break
+                crouch = drive['crouch']
+                if time.monotonic() >= self.drive_deadline:
+                    stop_reason = 'drive_timeout_700ms'
+                    break
+                if not any(abs(drive[a]) >= .05 for a in ('x', 'y', 'yaw')):
+                    stop_reason = 'zero_input'
+                    break
+                step, side, right, turn = drive_order(drive)
+                heading = wrap(heading + turn)
+                if not self.body_imu.fresh(time.monotonic()):
+                    if not (yield from self.wait_for_imu()):
+                        return
+                rotation = max(-.7, min(.7, wrap(heading-quaternion_yaw(self.read_body_quaternion()))))
+                if cycle < 2:
+                    step *= (cycle+1)/3
+                if right is not None and right != engine.first_Leg_Is_Right_Leg:
+                    if cycle >= 2:
+                        yield from engine.cycle(step, side, rotation, half=True)
+                    engine.first_Leg_Is_Right_Leg = right
+                yield from engine.cycle(step, side, rotation, 'first' if cycle == 0 else 'other')
+                cycle += 1
+                self.jobs[self.active]['progress'] = cycle
+                self.emit('job.progress', dict(self.jobs[self.active]))
+            self.log('INFO', f'Walk_pult finishing: {stop_reason}; cycles={cycle}; IK skipped={engine.exitFlag}')
+            if cycle:
+                yield from engine.cycle(*engine.last_order, kind='last')
+            if crouch == 'off':
+                yield from engine.final()
+                self.pose = 'stand'
+            else:
+                if crouch == 'centered':
+                    yield from engine.centered_crouch()
+                yield 'drain',
+                self.pose = 'crouch_centered' if crouch == 'centered' else 'crouch'
+                self.engine = engine
+            completed = True
+        finally:
+            if not completed:
+                self.engine = None
+                self.pose = 'unknown'
 
     def _crouch_target(self, centered, height=None):
         if self.simulated:
@@ -1262,7 +1340,8 @@ class Body:
             yield "sleep", 0.15
         else:
             self.pose = 'unknown'
-            engine = self._engine()
+            from roki_ng.body.motion.engine import Engine
+            engine = Engine(self.parameters, log=self.log, backend=self.backend)
             engine.kick_power = power
             yield from engine.kick(leg == "right", kick_offset=offset)
             yield "drain",
@@ -1332,6 +1411,34 @@ class Body:
         # Only a completed return to the baseline may reuse the gait state.
         self.pose = pose
         self.engine = engine
+
+    def _pult_turn(self, direction, fraction, crouch):
+        from roki_ng.body.recovery import body_position, stable_position
+        from roki_ng.body.motion.backends.roki1.primitives import pult_turn_steps
+        # A completed support pose and fresh polled IMU already establish the
+        # precondition. Do not wait for three MORE samples for every Q/E press.
+        if (self.pose in ('stand', 'base_stand', 'crouch', 'crouch_centered')
+                and self.body_imu.fresh(time.monotonic())):
+            position = body_position(self.read_body_quaternion())
+        else:
+            position = yield from stable_position(self)
+        if position is None:
+            return
+        if position != 'upright':
+            raise Fault('fallen', 'Manual turn requires upright body')
+        if crouch == 'off':
+            yield from self._pose('stand')
+        else:
+            target = 'crouch_centered' if crouch == 'centered' else 'crouch'
+            if self.pose != target:
+                yield from self._pose('crouch')
+                if crouch == 'centered' and not self.simulated:
+                    yield from self._engine().centered_crouch()
+                self.pose = target
+        steps = pult_turn_steps(self.model, self.servo_targets, direction, fraction)
+        self.log('INFO', f'Walk_pult manual turn: {direction}, fraction={fraction:.2f}')
+        yield from self._relative_jump(steps)
+        yield 'sleep', .06
 
     def _jump_rows(self, direction, fraction):
         return self.backend.jump_rows(direction, fraction)
