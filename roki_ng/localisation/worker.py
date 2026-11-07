@@ -1,5 +1,4 @@
 """Synchronized, bounded diagnostic localization. Never authorizes motion."""
-import json
 from pathlib import Path
 import threading
 import time
@@ -118,16 +117,13 @@ class Localisation:
         from roki_ng.localisation.filter import PoseFilter
         from roki_ng.vision.ground_projection import GroundProjection
         try:
-            profile=json.loads((self.directory/'profile.json').read_text())
-            if profile.get('schema')!=1:
-                raise ValueError('Unsupported calibration profile schema')
-            if profile.get('capture_size')!=[800,650]:
-                raise ValueError('Incompatible capture mode')
+            from roki_ng.vision.calibration import calibration_directory
+            directory=calibration_directory(self.directory)
             self.parameters=self.parameters | args.get('parameters',{})
             from roki_ng.localisation.field_config import configuration_id
             configuration=configuration_id(self.parameters)
             from roki_ng.vision.camera_geometry import height
-            projector=GroundProjection(self.directory,height(self.parameters, self.camera_model))
+            projector=GroundProjection(directory,height(self.parameters, self.camera_model))
             engine=PoseFilter(args['prior'],count=2048,parameters=self.parameters)
             offset=args['unicam_minus_stm']
             if type(offset) is not int or abs(offset)>2**32:

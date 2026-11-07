@@ -5,7 +5,6 @@ The paired head IMU supplies pitch/roll; results
 are head-level coordinates. The coordinator rotates them by the acknowledged
 stationary pan and rejects frames captured before that head job completed.
 """
-import json
 import math
 from pathlib import Path
 import threading
@@ -247,11 +246,10 @@ class BallObservation:
             from roki_ng.dataplane import IMU_RECORD
             from roki_ng.synchronization import SequenceJoiner
             cv2.setNumThreads(1)
-            profile = json.loads((self.directory/'profile.json').read_text())
-            if profile.get('schema') != 1 or profile.get('capture_size') != [800, 650]:
-                raise ValueError('Incompatible calibration profile')
+            from roki_ng.vision.calibration import calibration_directory
+            directory = calibration_directory(self.directory)
             from roki_ng.vision.camera_geometry import height
-            projector = GroundProjection(self.directory, height(self.parameters, self.camera_model))
+            projector = GroundProjection(directory, height(self.parameters, self.camera_model))
             if self.stop_event.is_set():
                 return
             # Construct and release every iceoryx object on its owning thread.

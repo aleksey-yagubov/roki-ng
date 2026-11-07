@@ -1130,9 +1130,15 @@ requested datastream, не OSD. Direct-gst не требует IMU и не сб�
 
 Старт не запускает камеру и не двигает голову. Начальная гипотеза относится к
 карте с началом в центре поля; x вдоль длины, y влево. Размеры поступают из
-field.geometry, default 3,35×2,35 м. Worker проверяет профиль оптики в
-`STATE_DIR/localisation/profile.json`, schema=1, capture_size=[800,650]. Высота
-берётся из `localisation.camera_height_m` (default 0.4068, диапазон 0.2..0.8).
+field.geometry, default 3,35×2,35 м. Worker проверяет профиль оптики.
+Индивидуальный комплект: `STATE_DIR/localisation/profile.json`, schema=1,
+capture_size=[800,650]. Если ни одного файла комплекта нет, детекция мяча,
+football и локализация читают общий комплект из `roki_ng/vision/calibration_default`
+напрямую, без копирования в STATE_DIR. Неполный или несовместимый индивидуальный
+комплект вызывает ошибку, а не смешивается с общим. Общая оптическая калибровка
+взята из оригинального Roki_2_Soccer; точность следует проверить на каждом роботе.
+Высота берётся из геометрии выбранной модели; ненулевой
+`camera.custom_height_m` переопределяет её для стендовых испытаний.
 Рядом должны быть три legacy npy: Camera_calibration_P, Camera_calibration_map1,
 Camera_calibration_map2. Профиль пока не редактируется этим API.
 
