@@ -89,7 +89,7 @@ Hello:
 `client_instance`: непустая строка до 64 символов. Повтор hello с тем же адресом и
 instance возвращает ту же сессию. `welcome` содержит session/token в конверте, а в
 body: `robot_id`, `boot_id`, `heartbeat_ms=500`, `session_timeout_ms=2000`,
-`drive_timeout_ms=350`, `state`,
+`drive_timeout_ms=700`, `state`,
 `max_datagram=1400`. Максимум четыре одновременные сессии. Неверный token/endpoint,
 повреждённый пакет или отсутствие свободной сессии не вызывают ответа.
 
@@ -325,7 +325,7 @@ crouch="off", heading_hold=false. x>0 вперёд, y>0 влево; знак yaw
 и требует проверки на роботе перед привязкой к UI. Мёртвая зона 0.05.
 
 Величины умножаются на параметры `walk.max_step_mm`, `walk.max_side_mm`,
-`walk.max_yaw_rad` и speed. После 350 мс без свежего drive worker начинает
+`walk.max_yaw_rad` и speed. После 700 мс без свежего drive worker начинает
 плавную остановку даже если heartbeat клиента продолжает приходить. При
 отпускании клавиш отправляются нули. Перед ходьбой из unknown/stand/base_stand
 один раз принимается crouch внутри самой задачи по новому ненулевому drive.

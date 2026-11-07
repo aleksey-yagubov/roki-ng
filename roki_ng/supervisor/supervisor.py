@@ -402,7 +402,7 @@ class Supervisor:
         session.seen = time.monotonic()
         self.send(session, "welcome", "hello", {
             "robot_id": self.config.get("robot_id", socket.gethostname()), "boot_id": self.boot_id,
-            "heartbeat_ms": 500, "session_timeout_ms": 2000, "drive_timeout_ms": 350,
+            "heartbeat_ms": 500, "session_timeout_ms": 2000, "drive_timeout_ms": 700,
             "state": self.mode, "max_datagram": UDP_LIMIT,
         }, ident)
 

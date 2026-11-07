@@ -366,7 +366,7 @@ class Body:
                 raise Fault("busy", "One-shot motion running", True)
             if self.stop_requested and self.active:
                 raise Fault("busy", "Finishing current walk; wait for completion", True)
-            self.drive, self.drive_deadline = drive, time.monotonic() + 0.35
+            self.drive, self.drive_deadline = drive, time.monotonic() + 0.7
             if active and not self.active:
                 return self._start(op, self._walk())
             return {"accepted": True, "job_id": self.active}
